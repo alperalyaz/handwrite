@@ -1,0 +1,26 @@
+[project]
+name = "handwrite"
+version = "0.1.0"
+description = "El yazısı dökümanlardan tutarlı OpenType font üreten araç"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "opencv-python-headless>=4.8",
+    "pillow>=10.0",
+    "fonttools>=4.40",
+    "potracer>=0.0.4",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "python-multipart>=0.0.9"]
+
+[project.scripts]
+handwrite = "handwrite.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["handwrite*"]
