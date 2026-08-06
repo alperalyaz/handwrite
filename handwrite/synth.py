@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .template import SheetSpec, find_reference_font, render_template
+from .template import Band, SheetSpec, find_reference_font, mm_to_px, render_template
 
 
 @dataclass
@@ -106,6 +106,8 @@ class SynthPage:
     #: üzerinden ölçmeyi sağlar: "bu glife atanan mürekkebin yüzde kaçı
     #: gerçekten o harfe ait?" sorusunun kesin cevabı buradan çıkar.
     labels: np.ndarray | None = None
+    #: Serbest sayfalarda üretilen yerleşim (gerçek taban çizgileri burada).
+    spec: SheetSpec | None = None
 
 
 # --------------------------------------------------------------------------
@@ -478,4 +480,126 @@ def synthesize_photo(
     """Doldurulmuş sayfayı üretip kamera bozulması uygular."""
     page = synthesize_sheet(spec, style, seed)
     page.photo = simulate_camera(page.canonical, seed=seed, **camera)
+    return page
+
+
+# --------------------------------------------------------------------------
+# Serbest sayfa: şablonsuz, sıradan (çizgili) kağıt
+# --------------------------------------------------------------------------
+
+#: Çizgili defterlerdeki basılı çizginin tipik tonu.
+RULE_LEVEL = 178
+MARGIN_RULE_LEVEL = 196
+
+
+def freeform_layout(
+    texts: list[str],
+    dpi: int = 200,
+    xheight_mm: float = 5.0,
+    line_spacing_mm: float = 9.0,
+    top_mm: float = 22.0,
+    left_mm: float = 20.0,
+    right_mm: float = 14.0,
+    page_mm: tuple[float, float] = (210.0, 297.0),
+) -> tuple[SheetSpec, list[Band]]:
+    """Sıradan bir defter sayfasının geometrisini üretir (işaretsiz).
+
+    Çalışma sayfasıyla aynı `Band` yapısını kullanır; böylece el yazısı çizimi
+    tek bir kod yolundan geçer. Fark şu: bu sayfada ne köşe işareti ne basılı
+    örnek metin vardır — boru hattının serbest yolu tam olarak bunu görmeli.
+    """
+    width = int(round(mm_to_px(page_mm[0], dpi)))
+    height = int(round(mm_to_px(page_mm[1], dpi)))
+    xheight = mm_to_px(xheight_mm, dpi)
+    spacing = mm_to_px(line_spacing_mm, dpi)
+    left = int(round(mm_to_px(left_mm, dpi)))
+    right = width - int(round(mm_to_px(right_mm, dpi)))
+
+    bands: list[Band] = []
+    for index, text in enumerate(texts):
+        baseline = int(round(mm_to_px(top_mm, dpi) + (index + 1) * spacing))
+        if baseline + xheight > height:
+            break
+        bands.append(
+            Band(
+                index=index,
+                text=text,
+                ref_rect=(0, 0, 0, 0),  # basılı örnek metin yok
+                write_rect=(left, int(baseline - 2.2 * xheight), right, int(baseline + xheight)),
+                ascender_y=int(baseline - 1.8 * xheight),
+                xheight_y=int(baseline - xheight),
+                baseline_y=baseline,
+                descender_y=int(baseline + 0.8 * xheight),
+            )
+        )
+
+    spec = SheetSpec(
+        page_index=0,
+        width=width,
+        height=height,
+        dpi=dpi,
+        marker_ids=[],
+        marker_corners=[],
+        bands=bands,
+    )
+    return spec, bands
+
+
+def synthesize_freeform(
+    texts: list[str],
+    style: HandStyle | None = None,
+    seed: int = 0,
+    ruled: bool = True,
+    margin_rule: bool = True,
+    dpi: int = 200,
+    **layout,
+) -> SynthPage:
+    """Sıradan bir deftere yazılmış gibi bir sayfa üretir.
+
+    `ruled=True` ile basılı defter çizgileri de çizilir. Bu, serbest yolun asıl
+    zorluğudur: çizgiler mürekkep gibi görünür, temizlenmezse satır tespitini ve
+    segmentasyonu bozarlar. Şablon modunda çizgilerin yerini biliyorduk, burada
+    bilmiyoruz.
+    """
+    style = style or HandStyle()
+    rng = np.random.default_rng(seed)
+    spec, bands = freeform_layout(texts, dpi=dpi, **layout)
+
+    paper = np.full((spec.height, spec.width), 249, np.uint8)
+    if ruled:
+        canvas = Image.fromarray(paper)
+        draw = ImageDraw.Draw(canvas)
+        x0 = int(round(mm_to_px(12.0, dpi)))
+        x1 = spec.width - int(round(mm_to_px(10.0, dpi)))
+        for band in bands:
+            draw.line([(x0, band.baseline_y), (x1, band.baseline_y)], fill=RULE_LEVEL, width=1)
+        if margin_rule and bands:
+            margin_x = bands[0].write_rect[0] - int(round(mm_to_px(4.0, dpi)))
+            draw.line(
+                [(margin_x, int(mm_to_px(10.0, dpi))), (margin_x, spec.height - int(mm_to_px(10.0, dpi)))],
+                fill=MARGIN_RULE_LEVEL,
+                width=1,
+            )
+        paper = np.asarray(canvas)
+
+    shape = (spec.height, spec.width)
+    ink = np.zeros(shape, np.uint8)
+    labels = np.full(shape, -1, np.int32)
+    truth: list[SynthChar] = []
+    for band in bands:
+        layer, band_labels, band_truth = _render_band(
+            band.text, band, style, rng, shape, band.index, label_base=len(truth)
+        )
+        np.maximum(ink, layer, out=ink)
+        np.copyto(labels, band_labels, where=(band_labels != -1) & (labels == -1))
+        truth.extend(band_truth)
+
+    alpha = ink.astype(np.float32) / 255.0
+    level = style.ink_level + rng.uniform(-8, 8)
+    canonical = np.clip(paper.astype(np.float32) * (1 - alpha) + level * alpha, 0, 255).astype(np.uint8)
+
+    page = SynthPage(
+        photo=canonical, canonical=canonical, ink=ink > 127, truth=truth, labels=labels
+    )
+    page.spec = spec
     return page

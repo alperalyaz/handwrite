@@ -17,7 +17,7 @@ import numpy as np
 from .config import Config
 from .fontbuild import BuildReport, build_font, save_font
 from .glyph import GlyphLibrary, apply_xheights, build_library, measure_xheights, normalize_all
-from .lines import Line, deslant_line, lines_from_bands, page_slant
+from .lines import Line, deslant_line, detect_lines, lines_from_bands, page_slant
 from .preprocess import RegistrationError, detect_markers, load_gray, prepare_page
 from .segment import DocumentSegmentation, segment_document
 from .template import SheetSet, SheetSpec
@@ -50,6 +50,10 @@ class Diagnostics:
     #: Örneklerinin çoğu elenmiş, gözden geçirilmesi iyi olur.
     weak_characters: list[tuple[str, int, int]] = field(default_factory=list)
     total_samples: int = 0
+    #: Serbest modda modelin okuduğu satırlar: (indeks, metin, güven).
+    transcriptions: list[tuple[int, str, float]] = field(default_factory=list)
+    #: Hizalama maliyeti yüksek olduğu için atılan glif sayısı.
+    dropped_glyphs: int = 0
 
     def summary_lines(self) -> list[str]:
         rows = [
@@ -57,8 +61,12 @@ class Diagnostics:
             f"eğim: {self.slant:.1f}°   kalem: {self.stroke_width:.1f} px   x-yüksekliği: {self.xheight_px:.0f} px",
             f"toplam karakter örneği: {self.total_samples}",
         ]
+        if self.transcriptions:
+            rows.append(f"okunan satır: {len(self.transcriptions)}")
         if self.rejected_lines:
             rows.append(f"elenen satır: {len(self.rejected_lines)}")
+        if self.dropped_glyphs:
+            rows.append(f"hizalaması şüpheli bulunup atılan glif: {self.dropped_glyphs}")
         if self.missing_characters:
             rows.append("fontta olmayan karakter: " + " ".join(self.missing_characters))
         if self.weak_characters:
@@ -155,6 +163,76 @@ def collect_lines(
     return lines, origin, diagnostics
 
 
+def build_from_freeform(
+    images: list[tuple[str, np.ndarray]],
+    transcriber,
+    cfg: Config | None = None,
+    min_confidence: float = 0.35,
+) -> PipelineResult:
+    """Herhangi bir el yazısı sayfasından font üretir — şablon gerekmeden.
+
+    Çalışma sayfası yolundan tek farkı, metnin nereden geldiğidir. Orada metni
+    biz dayatıyorduk; burada sayfada ne yazdığını bir görsel model okuyor.
+    Geri kalan her şey aynı deterministik zincirden geçer.
+
+    Modelin hata payı boru hattının içinde soğurulur: okunan metin yanlışsa o
+    kelimenin hizalama maliyeti yükselir ve glifleri atılır (bkz.
+    `segment.drop_misaligned_words`). Yani model yanılabilir, font bozulmaz.
+    """
+    cfg = cfg or Config()
+    diagnostics = Diagnostics()
+
+    lines: list[Line] = []
+    origin: dict[int, tuple[int, int]] = {}
+    strokes: list[float] = []
+
+    for page_index, (name, image) in enumerate(images):
+        page = prepare_page(image, None, cfg.preprocess)
+        page_lines = detect_lines(page, cfg.line)
+        for line in page_lines:
+            index = len(lines)
+            origin[index] = (page_index, line.index)
+            lines.append(replace(line, index=index))
+        strokes.append(page.stroke_width)
+        diagnostics.pages.append(
+            PageResult(
+                source=name,
+                page_index=page_index,
+                lines=len(page_lines),
+                ink_pixels=int(page.ink.sum()),
+            )
+        )
+
+    if not lines:
+        raise ValueError(
+            "Sayfalarda yazı satırı bulunamadı. Fotoğrafın net ve yazının "
+            "kağıttan belirgin şekilde koyu olduğundan emin olun."
+        )
+
+    diagnostics.stroke_width = float(np.median(strokes)) if strokes else 1.0
+
+    # Okuma, eğim düzeltmesinden *önce* yapılır: model yazıyı doğal haliyle
+    # daha iyi okur, dikleştirilmiş hali ona tanıdık gelmez.
+    readings = transcriber.transcribe_lines([line.ink for line in lines])
+    diagnostics.transcriptions = [(r.index, r.text, r.confidence) for r in readings]
+
+    usable: list[Line] = []
+    for line, reading in zip(lines, readings):
+        if not reading.usable or reading.confidence < min_confidence:
+            diagnostics.rejected_lines[origin.get(line.index, (0, line.index))] = (
+                "satır okunamadı" if not reading.usable
+                else f"okuma güveni düşük ({reading.confidence:.2f})"
+            )
+            continue
+        line.text = reading.text
+        usable.append(line)
+
+    if not usable:
+        raise ValueError("Hiçbir satır okunamadı; fotoğrafın okunaklı olduğundan emin olun.")
+
+    return _finish(usable, origin, diagnostics, cfg)
+
+
 def build_from_images(
     images: list[tuple[str, np.ndarray]],
     sheets: SheetSet,
@@ -169,16 +247,30 @@ def build_from_images(
             "Hiçbir sayfadan satır çıkarılamadı. Fotoğraflarda köşe işaretleri "
             "görünüyor mu ve yazı kılavuz çizgilerinin üstünde mi?"
         )
+    return _finish(lines, origin, diagnostics, cfg)
 
+
+def _finish(
+    lines: list[Line],
+    origin: dict[int, tuple[int, int]],
+    diagnostics: Diagnostics,
+    cfg: Config,
+) -> PipelineResult:
+    """Satırlardan fonta giden ortak kuyruk.
+
+    Metnin nereden geldiği (şablondan mı, modelden mi) buradan itibaren önemsiz
+    olur; iki yol da aynı deterministik zinciri kullanır.
+    """
     # Eğim bütün sayfalardan ortak hesaplanır: aynı elin yazısı olduğu için
     # sayfa başına ayrı düzeltmek tutarsızlık üretirdi.
     diagnostics.slant = page_slant(lines, limit=cfg.line.slant_limit, coarse=cfg.line.slant_step)
     straight = [deslant_line(line, diagnostics.slant) for line in lines]
 
     segmentation = segment_document(straight, diagnostics.stroke_width, cfg.segment)
-    diagnostics.rejected_lines = {
-        origin.get(index, (-1, index)): reason for index, reason in segmentation.rejected.items()
-    }
+    diagnostics.rejected_lines.update(
+        {origin.get(index, (-1, index)): reason for index, reason in segmentation.rejected.items()}
+    )
+    diagnostics.dropped_glyphs = segmentation.dropped_words
 
     # x-yüksekliği, segmentasyondan sonra gerçek gliflerden ölçülür; satırın
     # mürekkep profilinden yapılan ilk tahmin salt büyük harfli satırlarda

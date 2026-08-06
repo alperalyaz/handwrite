@@ -173,27 +173,55 @@ def lines_from_bands(page: Page, cfg: LineConfig) -> list[Line]:
 # --------------------------------------------------------------------------
 
 
+def estimate_line_pitch(profile: np.ndarray, minimum: int = 12) -> float:
+    """Satır aralığını (pitch) yatay profilin otokorelasyonundan ölçer.
+
+    Satır yüksekliğini "mürekkep içeren blokların kalınlığı" diye tahmin etmek
+    cazip ama kırılgandır: bir satırın descender'ı alttakinin ascender'ına
+    değdiği anda bütün sayfa tek bir bloğa dönüşür ve tahmin sayfa boyu kadar
+    çıkar. Oysa satırlar *periyodiktir* — insan hep aynı aralıkla yazar.
+    Otokorelasyon bu periyodu, satırlar birbirine değse de bulur.
+
+    En küçük güçlü tepe seçilir; en büyüğü seçmek periyodun iki katına
+    kilitlenip satırları ikişer ikişer birleştirme riski taşır.
+    """
+    if profile.size < 4 * minimum:
+        return float(max(profile.size / 4.0, minimum))
+
+    centred = profile - profile.mean()
+    correlation = np.correlate(centred, centred, mode="full")[profile.size - 1 :]
+    if correlation[0] <= 0:
+        return float(minimum)
+    correlation = correlation / correlation[0]
+
+    high = max(minimum + 1, profile.size // 3)
+    window = correlation[minimum:high]
+    if window.size < 3:
+        return float(minimum)
+
+    peaks = np.flatnonzero(
+        (window[1:-1] > window[:-2]) & (window[1:-1] >= window[2:]) & (window[1:-1] > 0.25)
+    )
+    if peaks.size == 0:
+        return float(minimum + int(np.argmax(window)))
+    return float(minimum + int(peaks[0]) + 1)
+
+
 def detect_lines(page: Page, cfg: LineConfig, texts: list[str] | None = None) -> list[Line]:
     """Şablonsuz bir sayfada satırları yatay projeksiyon profilinden bulur."""
     profile = page.ink.sum(axis=1).astype(np.float64)
     if profile.max() <= 0:
         return []
 
-    # Satır yüksekliğini kabaca tahmin et: mürekkep içeren satır bloklarının
-    # medyan kalınlığı.
-    occupied = profile > profile.max() * 0.04
-    runs = _runs(occupied)
-    if not runs:
-        return []
-    approx_height = float(np.median([end - start for start, end in runs]))
+    pitch = estimate_line_pitch(profile)
 
-    window = max(3, int(approx_height * cfg.smooth_ratio) | 1)
+    window = max(3, int(pitch * cfg.smooth_ratio) | 1)
     smooth = cv2.GaussianBlur(profile.reshape(-1, 1), (1, window), 0).ravel()
 
-    valleys = _split_at_valleys(smooth, approx_height, cfg)
+    bands = _split_at_valleys(smooth, pitch, cfg)
 
     lines: list[Line] = []
-    for index, (y0, y1) in enumerate(valleys):
+    for index, (y0, y1) in enumerate(bands):
         band = page.ink[y0:y1]
         if not band.any():
             continue
@@ -204,7 +232,7 @@ def detect_lines(page: Page, cfg: LineConfig, texts: list[str] | None = None) ->
         lines.append(
             Line(
                 index=index,
-                text=texts[index] if texts and index < len(texts) else "",
+                text="",
                 ink=mask,
                 origin=(x0, y0),
                 baseline=baseline,
@@ -212,7 +240,28 @@ def detect_lines(page: Page, cfg: LineConfig, texts: list[str] | None = None) ->
                 measured=True,
             )
         )
+
+    lines = _drop_fragment_lines(lines)
+    for index, line in enumerate(lines):
+        line.index = index
+        line.text = texts[index] if texts and index < len(texts) else ""
     return lines
+
+
+def _drop_fragment_lines(lines: list[Line], floor: float = 0.45) -> list[Line]:
+    """Satır sayılamayacak kadar cılız bantları eler.
+
+    Tepe bulma, bir satırın ascender'larından ya da descender'larından oluşan
+    ince şeritleri ayrı bir satır sanabilir. Bunlar ölçülen x-yüksekliğiyle
+    kendilerini belli eder: gerçek satırların onda biri kadar çıkarlar. Fonta
+    girerlerse hizalama o "satırda" tamamen saçmalar.
+    """
+    if len(lines) < 3:
+        return lines
+    reference = float(np.median([line.xheight for line in lines]))
+    if reference <= 0:
+        return lines
+    return [line for line in lines if line.xheight >= floor * reference]
 
 
 # --------------------------------------------------------------------------
@@ -350,23 +399,40 @@ def _runs(flags: np.ndarray) -> list[tuple[int, int]]:
 
 
 def _split_at_valleys(
-    smooth: np.ndarray, approx_height: float, cfg: LineConfig
+    smooth: np.ndarray, pitch: float, cfg: LineConfig
 ) -> list[tuple[int, int]]:
-    """Yumuşatılmış profili vadilerinden bölerek satır aralıklarını üretir."""
+    """Profilin tepelerini satır olarak alır, aralarındaki en derin vadiden böler.
+
+    Eşiğin üstündeki blokları satır saymak yetmez: bir satırın descender'ı
+    alttakinin ascender'ına değdiğinde iki satır tek blok olur ve eşik onları
+    asla ayıramaz. Tepeleri bulup aralarındaki en düşük noktadan *aktif olarak*
+    kesmek bu duruma dayanıklıdır.
+    """
+    if smooth.max() <= 0:
+        return []
+
     threshold = smooth.max() * cfg.min_peak_ratio
-    blocks = _runs(smooth > threshold)
-    min_sep = approx_height * cfg.min_separation_ratio
+    separation = max(3, int(pitch * cfg.min_separation_ratio))
 
-    merged: list[tuple[int, int]] = []
-    for start, end in blocks:
-        if merged and start - merged[-1][1] < min_sep:
-            merged[-1] = (merged[-1][0], end)
-        else:
-            merged.append((start, end))
+    # Tepe seçimi: en yüksekten başlayarak, seçilenlerin çevresini bloke ederek
+    # ilerle (maksimum olmayanların bastırılması).
+    peaks: list[int] = []
+    blocked = np.zeros(smooth.size, dtype=bool)
+    for index in np.argsort(smooth)[::-1]:
+        if smooth[index] < threshold:
+            break
+        if blocked[index]:
+            continue
+        peaks.append(int(index))
+        blocked[max(0, index - separation) : index + separation + 1] = True
+    if not peaks:
+        return []
+    peaks.sort()
 
-    pad = int(round(approx_height * cfg.padding_ratio))
-    return [
-        (max(0, start - pad), min(len(smooth), end + pad))
-        for start, end in merged
-        if end - start > approx_height * 0.25
-    ]
+    pad = pitch * (0.5 + cfg.padding_ratio)
+    edges = [max(0, int(peaks[0] - pad))]
+    for current, following in zip(peaks, peaks[1:]):
+        edges.append(current + int(np.argmin(smooth[current : following + 1])))
+    edges.append(min(smooth.size, int(peaks[-1] + pad)))
+
+    return [(start, end) for start, end in zip(edges, edges[1:]) if end - start > 3]

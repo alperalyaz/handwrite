@@ -155,6 +155,31 @@ def rectify_to_sheet(
 # --------------------------------------------------------------------------
 
 
+def _threshold_freeform(norm: np.ndarray, cfg: PreprocessConfig) -> np.ndarray:
+    """Şablonsuz sayfada mürekkebi ayırır — basılı defter çizgilerini eleyerek.
+
+    Buradaki asıl iş kalemi kağıttan ayırmak değil, kalemi *basılı defter
+    çizgisinden* ayırmaktır. İkisi de koyudur ama aynı ölçüde değil: matbaa
+    çizgisi kasten soluk basılır, kalem ise koyu yazar. Aydınlatma
+    düzeltmesinden sonra bu fark küresel bir tonda okunabilir hale gelir.
+
+    Otsu eşiği "kağıt olmayan her şeyi" verir; çizgiler de o tarafa düşer. Eşiği
+    ölçülen kalem tonuna doğru bir miktar sıkmak çizgileri eler. Bedeli, kalem
+    izlerinin kenarındaki yumuşak pikselleri de kaybetmektir — yani darbeler
+    kıl payı incelir, ki bu glif biçimini gözle görülür şekilde değiştirmez.
+    Alternatif olan uyarlamalı eşikleme burada işe yaramaz: yerel ortalamaya
+    göre karar verdiği için soluk çizgiyi kendi çevresinde koyu sayar.
+    """
+    threshold, _ = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    dark = norm[norm < threshold]
+    if dark.size == 0:
+        return norm < threshold
+
+    pen_level = float(np.median(dark))
+    strict = pen_level + cfg.pen_separation * (float(threshold) - pen_level)
+    return norm < strict
+
+
 def fit_print_response(norm: np.ndarray, template: np.ndarray) -> tuple[float, float, float]:
     """Basım + tarama zincirinin gri seviye tepkisini ölçer.
 
@@ -224,12 +249,7 @@ def extract_ink(
     norm = normalize_illumination(gray, cfg.illumination_kernel)
 
     if template is None:
-        # Serbest mod: şablon yok, uyarlamalı eşiklemeye düşülür.
-        window = cfg.binarize_window if cfg.binarize_window % 2 == 1 else cfg.binarize_window + 1
-        binary = cv2.adaptiveThreshold(
-            norm, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, window, cfg.binarize_offset
-        )
-        return despeckle(binary > 0, cfg.despeckle_min_area)
+        return despeckle(_threshold_freeform(norm, cfg), cfg.despeckle_min_area)
 
     slope, intercept, paper_level = fit_print_response(norm, template)
 
@@ -243,6 +263,115 @@ def extract_ink(
     if region is not None:
         ink &= region
     return despeckle(ink, cfg.despeckle_min_area)
+
+
+# --------------------------------------------------------------------------
+# Basılı cetvel çizgilerinin temizlenmesi (serbest mod)
+# --------------------------------------------------------------------------
+
+
+def _dense_thin_runs(
+    density: np.ndarray, min_fill: float, extent: int, max_thickness_ratio: float = 0.006
+) -> list[tuple[int, int]]:
+    """Basılı cetvel çizgilerinin bulunduğu piksel satırlarını döndürür.
+
+    İki koşul birden aranır. Yalnız yoğunluğa bakmak yetmez: sıkışık yazılmış
+    bir metin satırının x-yüksekliği bandı da yoğun çıkar. Ama o bant kalındır,
+    çizgi ise birkaç piksel; incelik koşulu ikisini ayırır.
+
+    Kritik ayrıntı: yoğun aralığın *tamamı* değil yalnız tepesi döndürülür.
+    Harfler çizginin üstüne oturduğu için, çizginin hemen üstündeki birkaç satır
+    da yoğun çıkar — o satırları da çizgi sayıp silmek harflerin ayaklarını
+    kesmek demektir. Silinecek olan yalnızca yoğunluğun tepe yaptığı, yani
+    gerçekten basılı çizginin bulunduğu satırlardır.
+    """
+    dense = density > min_fill
+    if not dense.any():
+        return []
+
+    padded = np.concatenate([[False], dense, [False]])
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    limit = max(3, int(extent * max_thickness_ratio))
+
+    runs: list[tuple[int, int]] = []
+    for start, end in zip(edges[::2], edges[1::2]):
+        if end - start > limit:
+            continue
+        window = density[start:end]
+        peak = float(window.max())
+        # Tepe değerinin belirgin şekilde altında kalan satırlar çizgiye değil,
+        # üstüne oturan yazıya aittir.
+        core = np.flatnonzero(window >= peak * 0.85)
+        runs.append((int(start + core[0]), int(start + core[-1] + 1)))
+    return runs
+
+
+def remove_rules(
+    ink: np.ndarray,
+    min_length_ratio: float = 0.30,
+    crossing_gap: int = 3,
+    thickness: int = 5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Defter çizgilerini siler, üstlerinden geçen kalem izlerini korur.
+
+    Şablon modunda çizgilerin nerede olduğunu biliyorduk; serbest modda
+    bilmiyoruz, o yüzden biçimlerinden tanıyoruz: bir defter çizgisi sayfa
+    genişliğinin belirgin bir kısmı boyunca kesintisiz yataydır. El yazısında
+    bu kadar uzun kesintisiz yatay iz bulunmaz.
+
+    Asıl incelik silerken: bir harfin dikey gövdesi çizgiyi kestiğinde o
+    piksellerin de çizgiye ait *görünmesi*dir. Onları da silmek harfi ikiye
+    böler. Ayırt etmek için her çizgi pikselinin birkaç piksel üstünde *ve*
+    altında mürekkep olup olmadığına bakılır: ikisi de varsa oradan bir kalem
+    geçiyor demektir ve piksel korunur.
+
+    Döndürür: (temizlenmiş mürekkep, silinen çizgi maskesi).
+    """
+    height, width = ink.shape
+
+    # Çizgileri kesintisiz uzunluklarından değil, *bir satırı boydan boya
+    # doldurmalarından* tanıyoruz. Basılı bir defter çizgisi tarama sonrası
+    # parça parça çıkabilir — o zaman sabit uzunluklu morfolojik açma onu
+    # bulamaz — ama parçalar hep aynı piksel satırında kalır. Satır yoğunluğu
+    # bu yüzden çok daha sağlam bir ölçüttür.
+    rule_rows = _dense_thin_runs(ink.sum(axis=1) / width, min_length_ratio, height)
+    rule_cols = _dense_thin_runs(ink.sum(axis=0) / height, min_length_ratio, width)
+
+    horizontal_rules = np.zeros_like(ink)
+    for start, end in rule_rows:
+        horizontal_rules[start:end] = ink[start:end]
+    vertical_rules = np.zeros_like(ink)
+    for start, end in rule_cols:
+        vertical_rules[:, start:end] = ink[:, start:end]
+
+    # Komşuluk sınaması, çizgi *dışındaki* mürekkebe karşı yapılır. Ham mürekkebe
+    # karşı yapılsaydı, birkaç piksel kalınlaşmış bir çizgi kendi kalınlığını
+    # "üstümde ve altımda mürekkep var" diye okur ve kendini korurdu.
+    other = ink & ~(horizontal_rules | vertical_rules)
+
+    gap = max(crossing_gap, thickness // 2 + 1)
+    above = np.zeros_like(ink)
+    below = np.zeros_like(ink)
+    above[: height - gap] = other[gap:]
+    below[gap:] = other[: height - gap]
+    left = np.zeros_like(ink)
+    right = np.zeros_like(ink)
+    left[:, : width - gap] = other[:, gap:]
+    right[:, gap:] = other[:, : width - gap]
+
+    # Kesişme testi çizginin yönüne göre ayrılmalıdır. Yatay bir çizgiyi "sağında
+    # ve solunda mürekkep var mı" diye sınamak anlamsızdır: çizginin *her*
+    # pikselinin sağında ve solunda kendisi vardır, dolayısıyla hiçbir şey
+    # silinmez. Yatay çizgiyi kesen şey dikey bir kalem izidir, o da ancak
+    # üstünde ve altında mürekkep olmasıyla anlaşılır. Dikey çizgide durum
+    # simetriktir.
+    removable = (horizontal_rules & ~(above & below)) | (vertical_rules & ~(left & right))
+
+    # Silinen çizginin uçlarında kalan kırıntıları da temizle.
+    grown = cv2.dilate(removable.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    removable = grown & (horizontal_rules | vertical_rules)
+
+    return ink & ~removable, removable
 
 
 # --------------------------------------------------------------------------
@@ -307,13 +436,17 @@ def prepare_page(
             stroke_width=estimate_stroke_width(ink),
         )
 
-    # Serbest mod: ölçekle, eğikliği düzelt, eşikle.
+    # Serbest mod: ölçekle, cetvel çizgilerini temizle, eğikliği düzelt.
     if cfg.target_short_side:
         scale = cfg.target_short_side / min(image.shape[:2])
         if scale < 1.0:
             image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
     ink = extract_ink(image, cfg, None)
+    if cfg.remove_rules:
+        ink, _ = remove_rules(ink, min_length_ratio=cfg.rule_min_length_ratio)
+        ink = despeckle(ink, cfg.despeckle_min_area)
+
     angle = estimate_skew(ink, cfg)
     if abs(angle) > 0.05:
         ink = rotate_image(ink.astype(np.uint8), angle, fill=0) > 0

@@ -75,6 +75,10 @@ class CharBox:
     #: Satırın taban çizgisi ve x-yüksekliği (satır koordinatı / piksel).
     baseline: float
     xheight: float
+    #: Bu karakterin içinde bulunduğu kelimenin hizalama maliyeti (karakter
+    #: başına). Metin yanlışsa yükselir; hangi gliflerin şüpheli olduğunu
+    #: buradan biliriz.
+    word_cost: float = 0.0
 
     @property
     def advance(self) -> int:
@@ -192,13 +196,32 @@ def split_span(
     cut_cost: np.ndarray,
     cfg: SegmentConfig,
 ) -> list[int] | None:
+    """`solve_split`in yalnızca sınırları döndüren kısayolu."""
+    bounds, _ = solve_split(lo, hi, expected, cut_cost, cfg)
+    return bounds
+
+
+def solve_split(
+    lo: int,
+    hi: int,
+    expected: np.ndarray,
+    cut_cost: np.ndarray,
+    cfg: SegmentConfig,
+) -> tuple[list[int] | None, float]:
     """[lo, hi) aralığını, verilen bağıl genişliklere göre en iyi şekilde böler.
 
     `expected` her parçanın bağıl genişlik önselidir; ölçek aralığın toplam
     genişliğinden türetilir. `cut_cost[c]` c sütunundan kesmenin maliyetidir.
 
+    Sınırlarla birlikte *en iyi çözümün maliyeti* de döndürülür. Bu maliyet
+    sadece bir ara değer değil, hizalamanın kendi kendini denetleme aracıdır:
+    metin gerçekten yazılana uyuyorsa parçalar genişlik önsellerine oturur ve
+    maliyet düşük çıkar. Metin yanlışsa (ör. okuyan model bir harf düşürmüşse)
+    aynı mürekkebe yanlış sayıda karakter sığdırılmaya çalışılır ve maliyet
+    belirgin şekilde yükselir.
+
     Döndürülen liste `len(expected) + 1` sınır içerir; ilki `lo`, sonuncusu
-    `hi`'dir. Kısıtlar sağlanamıyorsa None döner.
+    `hi`'dir. Kısıtlar sağlanamıyorsa (None, sonsuz) döner.
 
     DP, min-plus evrişimidir ve her parça için izin verilen genişlik aralığı
     üzerinde vektörleştirilmiştir; maliyet O(parça · genişlik_aralığı · uzunluk).
@@ -206,13 +229,13 @@ def split_span(
     n = len(expected)
     span = hi - lo
     if n == 0 or span <= 0:
-        return None
+        return None, INF
     if n == 1:
-        return [lo, hi]
+        return [lo, hi], 0.0
 
     total = float(expected.sum())
     if total <= 0:
-        return None
+        return None, INF
     scale = span / total
     widths = np.maximum(expected * scale, 1.0)
 
@@ -246,23 +269,25 @@ def split_span(
         back[i] = row_back
 
     if not np.isfinite(dp[n, span]) or dp[n, span] >= INF:
-        return None
+        return None, INF
 
     boundaries = [span]
     position = span
     for i in range(n, 0, -1):
         step = int(back[i, position])
         if step <= 0:
-            return None
+            return None, INF
         position -= step
         boundaries.append(position)
     boundaries.reverse()
-    return [b + lo for b in boundaries]
+    # Maliyet parça başına normalize edilir; uzun kelimeler doğal olarak daha
+    # çok terim topladığı için ham toplam kelimeler arası karşılaştırılamaz.
+    return [b + lo for b in boundaries], float(dp[n, span]) / n
 
 
 def _relaxed_split(
     lo: int, hi: int, expected: np.ndarray, cut_cost: np.ndarray, cfg: SegmentConfig
-) -> list[int]:
+) -> tuple[list[int], float]:
     """`split_span`i gevşetilmiş kısıtlarla dener, olmazsa orantılı böler.
 
     Kısıtların sağlanamaması gerçek bir durumdur: kullanıcı satırın sonunu
@@ -270,17 +295,19 @@ def _relaxed_split(
     çöpe atmak yerine elden geldiğince bölüp devam ederiz; kötü çıkan glifler
     zaten sonraki aykırı değer elemesinde düşer.
     """
-    result = split_span(lo, hi, expected, cut_cost, cfg)
+    result, cost = solve_split(lo, hi, expected, cut_cost, cfg)
     if result is not None:
-        return result
+        return result, cost
 
     relaxed = SegmentConfig(**{**cfg.__dict__, "min_width_factor": 0.12, "max_width_factor": 6.0})
-    result = split_span(lo, hi, expected, cut_cost, relaxed)
+    result, cost = solve_split(lo, hi, expected, cut_cost, relaxed)
     if result is not None:
-        return result
+        # Gevşetilmiş kısıtlarla çözüldüyse hizalama zaten şüphelidir; maliyet
+        # buna göre cezalandırılır ki aşağıdaki eleme onu görebilsin.
+        return result, cost + 1.0
 
     fractions = np.concatenate([[0.0], np.cumsum(expected) / expected.sum()])
-    return [int(round(lo + f * (hi - lo))) for f in fractions]
+    return [int(round(lo + f * (hi - lo))) for f in fractions], INF
 
 
 # --------------------------------------------------------------------------
@@ -343,7 +370,7 @@ def segment_line(
     token_widths = np.array(
         [_token_width(tok, sp, priors) for tok, sp in tokens], dtype=np.float64
     )
-    token_bounds = _relaxed_split(lo, hi, token_widths, cut_cost, cfg)
+    token_bounds, _ = _relaxed_split(lo, hi, token_widths, cut_cost, cfg)
 
     boxes: list[CharBox] = []
     char_offset = 0
@@ -353,13 +380,14 @@ def segment_line(
             continue
 
         char_widths = np.array([priors.width(ch) for ch in token], dtype=np.float64)
-        bounds = _relaxed_split(start, end, char_widths, cut_cost, cfg)
+        bounds, cost = _relaxed_split(start, end, char_widths, cut_cost, cfg)
 
         for k, ch in enumerate(token):
             box = _extract_char(
                 line, field, ch, line.index, char_offset + k, bounds[k], bounds[k + 1]
             )
             if box is not None:
+                box.word_cost = cost
                 boxes.append(box)
         char_offset += len(token)
 
@@ -429,6 +457,8 @@ class DocumentSegmentation:
     scales: dict[int, float] = field(default_factory=dict)
     #: Güvenilmez bulunup elenen satırlar ve sebepleri.
     rejected: dict[int, str] = field(default_factory=dict)
+    #: Hizalama maliyeti yüksek olduğu için atılan glif sayısı.
+    dropped_words: int = 0
 
 
 def segment_document(
@@ -452,7 +482,45 @@ def segment_document(
     rejected = _reject_outlier_lines(scales, cfg)
 
     boxes = [box for index, group in by_line.items() if index not in rejected for box in group]
-    return DocumentSegmentation(boxes=boxes, priors=priors, scales=scales, rejected=rejected)
+    boxes, dropped = drop_misaligned_words(boxes, cfg)
+    return DocumentSegmentation(
+        boxes=boxes,
+        priors=priors,
+        scales=scales,
+        rejected=rejected,
+        dropped_words=dropped,
+    )
+
+
+def drop_misaligned_words(
+    boxes: list[CharBox], cfg: SegmentConfig
+) -> tuple[list[CharBox], int]:
+    """Hizalama maliyeti anormal yüksek kelimelerin gliflerini atar.
+
+    Bu, metnin dışarıdan geldiği (bir modelin okuduğu) durumda asıl güvenlik
+    ağıdır. Okunan metinde tek bir harf eksik ya da fazlaysa, o kelimenin
+    mürekkebine yanlış sayıda karakter sığdırılır ve kelimedeki *bütün* glifler
+    kayar. Maliyet bunu görür: doğru metinde parçalar genişlik önsellerine
+    oturur, yanlış metinde oturmaz.
+
+    Hasarın kelimeyle sınırlı kalması, segmentasyonun iki kademeli olmasının
+    doğal sonucudur — önce kelimeler, sonra kelime içi karakterler bölünür.
+    Tek kademeli bir hizalamada bir harflik hata bütün satırı kaydırırdı.
+
+    Eşik mutlak değil, belgenin kendi maliyet dağılımına göre belirlenir:
+    kullanıcının yazısı ne kadar düzgünse taban maliyet o kadar düşüktür.
+    """
+    costs = np.array([box.word_cost for box in boxes], dtype=np.float64)
+    finite = costs[np.isfinite(costs)]
+    if finite.size < 10:
+        return boxes, 0
+
+    median = float(np.median(finite))
+    deviation = float(np.median(np.abs(finite - median))) or 1e-6
+    limit = median + cfg.word_cost_tolerance * deviation
+
+    kept = [box for box in boxes if box.word_cost <= limit]
+    return kept, len(boxes) - len(kept)
 
 
 def _reject_outlier_lines(scales: dict[int, float], cfg: SegmentConfig) -> dict[int, str]:

@@ -125,6 +125,23 @@ class PreprocessConfig:
     #: koyu olması gerektiği; kağıt seviyesinin oranı olarak. Küçültmek soluk
     #: kalemleri yakalar ama basılı içeriği sızdırma riskini artırır.
     ink_margin_ratio: float = 0.22
+    #: Serbest modda eşiğin kalem tonuna doğru ne kadar sıkılacağı.
+    #:
+    #: 0 = Otsu eşiği (kağıt olmayan her şey mürekkep; defter çizgileri de dahil),
+    #: 1 = kalem tonunun tam kendisi (çok katı, harflerin gövdesi delinir).
+    #: Aradaki değer çizgileri eler, bedeli darbelerin kıl payı incelmesidir.
+    pen_separation: float = 0.80
+    #: Serbest modda cetvel çizgilerini ayrıca morfolojik olarak temizle.
+    #:
+    #: Varsayılan olarak kapalı ve öyle kalmalı: yukarıdaki ton ayrımı çizgilerin
+    #: %98'ini zaten eliyor, morfolojik temizlik ise üzerine hiçbir şey katmayıp
+    #: harflerin taban çizgisine oturan altlarını yiyor (ölçümde geri kazanım
+    #: 0.97'den 0.68'e düşüyor). Yalnızca çizgilerin kalem kadar koyu olduğu
+    #: sıra dışı bir kağıtta açılması anlamlı olabilir.
+    remove_rules: bool = False
+    #: Bir piksel satırının "cetvel çizgisi" sayılması için mürekkeple dolu
+    #: olması gereken oran. El yazısı hiçbir satırı bu kadar doldurmaz.
+    rule_min_length_ratio: float = 0.30
 
 
 @dataclass
@@ -194,6 +211,11 @@ class SegmentConfig:
     #: güvenilmez sayılıp elenir. Asıl hedefi, metni tamamlanmamış satırları
     #: yakalamaktır: orada hizalama bütün satır boyunca kayar.
     line_scale_tolerance: float = 0.22
+    #: Bir kelimenin hizalama maliyeti, belge medyanından bu kadar MAD ötedeyse
+    #: o kelimenin glifleri atılır. Metin dışarıdan (bir modelden) geldiğinde
+    #: asıl güvenlik ağı budur: okumadaki tek harflik hata o kelimeyi bozar,
+    #: maliyet de bunu ele verir. Düşürmek daha temiz ama daha az glif bırakır.
+    word_cost_tolerance: float = 6.0
 
 
 @dataclass
