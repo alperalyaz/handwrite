@@ -96,15 +96,57 @@ def test_uretilmemis_font_indirilemez(client):
 
 def test_yazisiz_gorsel_anlasilir_hata_verir(client):
     """Boş bir kağıt fotoğrafı çökme değil, açıklama üretmeli."""
+    import time
+
     blank = Image.fromarray(np.full((900, 700), 245, np.uint8))
     buffer = io.BytesIO()
     blank.save(buffer, format="PNG")
 
-    response = client.post(
+    started = client.post(
         "/api/read",
         data={"family": "Test", "api_key": "sahte-anahtar"},
         files={"photos": ("bos.png", buffer.getvalue(), "image/png")},
     )
-    # Ya satır bulunamaz (422) ya da sahte anahtarla okuma başarısız olur (502).
-    assert response.status_code in (422, 502)
-    assert response.json()["detail"]
+    assert started.status_code == 200
+    job = started.json()["job"]
+
+    for _ in range(200):
+        state = client.get(f"/api/job/{job}").json()
+        if state["done"]:
+            break
+        time.sleep(0.1)
+
+    assert state["done"], "iş bitmedi"
+    assert state.get("error"), "boş sayfada hata bildirilmedi"
+    assert "result" not in state
+
+
+def test_uzun_is_ilerleme_bildirir(client):
+    """Kullanıcı 'takıldı mı, çalışıyor mu' sorusunu sormak zorunda kalmamalı."""
+    import time
+
+    blank = Image.fromarray(np.full((900, 700), 245, np.uint8))
+    buffer = io.BytesIO()
+    blank.save(buffer, format="PNG")
+
+    job = client.post(
+        "/api/read",
+        data={"family": "Test", "api_key": "sahte"},
+        files={"photos": ("bos.png", buffer.getvalue(), "image/png")},
+    ).json()["job"]
+
+    state = client.get(f"/api/job/{job}").json()
+    assert "stage" in state and state["stage"]
+    assert "elapsed" in state and isinstance(state["elapsed"], (int, float))
+    assert "done" in state
+
+    for _ in range(200):
+        state = client.get(f"/api/job/{job}").json()
+        if state["done"]:
+            break
+        time.sleep(0.1)
+    assert state["elapsed"] >= 0
+
+
+def test_olmayan_is_sorgulanamaz(client):
+    assert client.get("/api/job/olmayan").status_code == 404

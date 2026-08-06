@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import io
 import tempfile
+import threading
+import time
+import traceback
 import uuid
 import zipfile
 from dataclasses import dataclass, field
@@ -63,6 +66,31 @@ class Session:
 
 
 SESSIONS: dict[str, Session] = {}
+
+
+@dataclass
+class Job:
+    """Arka planda süren bir font üretimi.
+
+    Üretim yarım dakikayı bulabiliyor; bunu tek bir uzun HTTP isteğiyle yapmak
+    kullanıcıyı ekranda "bir şey oluyor mu?" diye bırakır ve tarayıcı/vekil
+    zaman aşımlarına takılır. İş arka plana alınıp durumu sorgulanabilir hale
+    getirildi: arayüz hangi aşamada olduğunu ve ne kadar süre geçtiğini
+    gösterebiliyor.
+    """
+
+    stage: str = "başlıyor"
+    started: float = field(default_factory=time.monotonic)
+    done: bool = False
+    error: str | None = None
+    payload: dict | None = None
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+
+JOBS: dict[str, Job] = {}
 
 
 def _png(image) -> bytes:
@@ -162,7 +190,7 @@ async def read(
     api_key: str = Form(""),
     photos: list[UploadFile] = File(...),
 ) -> JSONResponse:
-    """Herhangi bir el yazısı fotoğrafından font üretir."""
+    """Font üretimini arka planda başlatır ve iş kimliği döndürür."""
     from .ai.gemini import GeminiTranscriber
 
     try:
@@ -177,24 +205,55 @@ async def read(
     cfg = Config()
     cfg.font.family_name = family.strip() or "Handwrite"
 
-    try:
-        result = build_from_freeform(images, transcriber, cfg)
-    except AIError as exc:
-        raise HTTPException(502, f"Okuma başarısız: {exc}") from exc
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+    job_id = uuid.uuid4().hex
+    job = Job()
+    JOBS[job_id] = job
 
-    token = uuid.uuid4().hex
-    entry = Session(family=cfg.font.family_name)
-    buffer = io.BytesIO()
-    result.font.save(buffer)
-    entry.font_bytes = buffer.getvalue()
-    _render_preview(entry)
-    SESSIONS[token] = entry
+    def run() -> None:
+        try:
+            result = build_from_freeform(
+                images, transcriber, cfg, progress=lambda stage: setattr(job, "stage", stage)
+            )
+        except AIError as exc:
+            job.error = f"Okuma başarısız: {exc}"
+        except ValueError as exc:
+            job.error = str(exc)
+        except Exception:  # beklenmeyen hatayı da kullanıcıya bir şey söyleyerek bitir
+            job.error = "Beklenmeyen bir hata oluştu:\n" + traceback.format_exc(limit=3)
+        else:
+            token = uuid.uuid4().hex
+            entry = Session(family=cfg.font.family_name)
+            buffer = io.BytesIO()
+            result.font.save(buffer)
+            entry.font_bytes = buffer.getvalue()
+            job.stage = "önizleme çiziliyor"
+            _render_preview(entry)
+            SESSIONS[token] = entry
 
-    payload = _diagnostics_payload(result)
-    payload["session"] = token
-    return JSONResponse(payload)
+            payload = _diagnostics_payload(result)
+            payload["session"] = token
+            job.payload = payload
+        finally:
+            job.stage = "bitti"
+            job.done = True
+
+    threading.Thread(target=run, daemon=True).start()
+    return JSONResponse({"job": job_id})
+
+
+@app.get("/api/job/{job_id}")
+def job_status(job_id: str) -> JSONResponse:
+    """İşin hangi aşamada olduğunu ve ne kadar süredir sürdüğünü bildirir."""
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "iş bulunamadı")
+
+    body: dict = {"stage": job.stage, "elapsed": round(job.elapsed, 1), "done": job.done}
+    if job.error:
+        body["error"] = job.error
+    if job.payload:
+        body["result"] = job.payload
+    return JSONResponse(body)
 
 
 # --------------------------------------------------------------------------
@@ -427,7 +486,14 @@ INDEX_HTML = """
         <input type="text" id="family" value="Benim Yazım"></div>
     </div>
     <button id="go" disabled>Fontu üret</button>
-    <div id="bar" class="bar hidden"><i></i></div>
+    <div id="prog" class="hidden" style="margin-top:16px">
+      <div class="row" style="justify-content:space-between">
+        <b id="stage">başlıyor…</b>
+        <span class="muted" id="elapsed">0 sn</span>
+      </div>
+      <div class="bar"><i></i></div>
+      <div class="muted" id="hint" style="margin-top:8px"></div>
+    </div>
     <pre id="log"></pre>
   </div>
 
@@ -553,14 +619,28 @@ $('snap').onclick = () => {
 };
 
 // -- üretim ----------------------------------------------------------------
+// Uzun süren işi tek bir HTTP isteğiyle beklemek yerine iş kimliği alınıp
+// durumu sorgulanır: kullanıcı hangi aşamada olduğunu ve kaç saniye geçtiğini
+// görür. Sessizce bekleyen bir çubuk, takılmayla çalışmayı ayırt ettirmiyordu.
+let timer = null;
+
+function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+
+function showProgress(on) {
+  $('prog').classList.toggle('hidden', !on);
+  if (!on) stopTimer();
+}
+
 $('go').onclick = async () => {
   const key = $('key') ? $('key').value.trim() : '';
   if (!aiReady && !key) {
     $('log').innerHTML = '<span class="bad">Önce API anahtarını girin.</span>';
     return;
   }
-  $('go').disabled = true; $('bar').classList.remove('hidden');
-  $('log').textContent = 'Yazı okunuyor ve font üretiliyor… (sayfa başına ~20 sn)';
+  $('go').disabled = true; $('log').textContent = '';
+  showProgress(true);
+  $('stage').textContent = 'fotoğraf yükleniyor…';
+  $('elapsed').textContent = '0 sn'; $('hint').textContent = '';
 
   const form = new FormData();
   form.append('family', $('family').value || 'Handwrite');
@@ -571,16 +651,18 @@ $('go').onclick = async () => {
   try { r = await fetch('/api/read', {method:'POST', body:form}); }
   catch (err) {
     $('log').innerHTML = '<span class="bad">Sunucuya ulaşılamadı: ' + err.message + '</span>';
-    $('go').disabled = false; $('bar').classList.add('hidden'); return;
+    $('go').disabled = false; showProgress(false); return;
   }
-  $('bar').classList.add('hidden'); $('go').disabled = false;
-
   if (!r.ok) {
     const e = await r.json().catch(() => ({detail:'bilinmeyen hata'}));
     $('log').innerHTML = '<span class="bad">' + e.detail + '</span>';
-    return;
+    $('go').disabled = false; showProgress(false); return;
   }
-  const d = await r.json();
+
+  const { job } = await r.json();
+  const d = await poll(job);
+  $('go').disabled = false; showProgress(false);
+  if (!d) return;
 
   let out = d.summary.join('\\n');
   if (d.page_errors.length) out += '\\n\\n! ' + d.page_errors.join('\\n! ');
@@ -597,6 +679,33 @@ $('go').onclick = async () => {
   $('out').classList.remove('hidden');
   $('out').scrollIntoView({behavior:'smooth', block:'nearest'});
 };
+
+async function poll(job) {
+  return new Promise(resolve => {
+    timer = setInterval(async () => {
+      let s;
+      try { s = await (await fetch('/api/job/' + job)).json(); }
+      catch { return; }
+
+      $('stage').textContent = s.stage;
+      $('elapsed').textContent = Math.round(s.elapsed) + ' sn';
+      // Beklemenin normal olup olmadığını kullanıcı bilmeli.
+      $('hint').textContent = s.elapsed > 90
+        ? 'Alışılmadık şekilde uzun sürüyor. Gemini yoğun olabilir; 5 dakikada '
+          + 'tamamlanmazsa kendiliğinden durur ve size haber verir.'
+        : 'Tipik süre: sayfa başına 20–40 saniye.';
+
+      if (!s.done) return;
+      stopTimer();
+      if (s.error) {
+        $('log').innerHTML = '<span class="bad">' + s.error.replace(/\\n/g,'<br>') + '</span>';
+        resolve(null);
+      } else {
+        resolve(s.result);
+      }
+    }, 900);
+  });
+}
 </script>
 </html>
 """

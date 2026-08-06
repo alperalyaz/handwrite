@@ -66,11 +66,18 @@ RESPONSE_SCHEMA = {
 }
 
 
-def encode_line(image: np.ndarray, height: int = 96) -> str:
+def encode_line(image: np.ndarray, height: int = 64) -> str:
     """Satır görüntüsünü base64 PNG'ye çevirir.
 
-    Şeritler modele siyah-beyaz ve sabit yükseklikte gönderilir: kağıt dokusu,
-    gölge ve renk okumaya katkı sağlamaz, yalnız veri boyutunu büyütür.
+    Şeritler modele siyah-beyaz gönderilir: kağıt dokusu, gölge ve renk okumaya
+    katkı sağlamaz, yalnız veri boyutunu büyütür.
+
+    Ölçekleme **yalnız küçültme yönünde** yapılır. Sabit bir yüksekliğe
+    "normalize etmek" ilk bakışta düzenli görünür ama tipik bir satır maskesi
+    zaten 50-60 piksel yüksekliğindedir; onu 96'ya çıkarmak hiçbir bilgi
+    katmadan görüntü alanını üç katına çıkarır. Bu, istek gövdesini şişirip
+    modelin işini ağırlaştırır ve gerçek ölçümde zaman aşımına yol açtı: 10
+    satırlık bir grup 330 KB'a çıkıyordu.
     """
     array = image
     if array.dtype == bool:
@@ -79,7 +86,7 @@ def encode_line(image: np.ndarray, height: int = 96) -> str:
         array = np.clip(array, 0, 255).astype(np.uint8)
 
     picture = Image.fromarray(array)
-    if picture.height != height and picture.height > 0:
+    if 0 < height < picture.height:
         scale = height / picture.height
         picture = picture.resize(
             (max(1, int(picture.width * scale)), height), Image.LANCZOS
@@ -97,12 +104,21 @@ class GeminiTranscriber(Transcriber):
     api_key: str | None = None
     model: str = DEFAULT_MODEL
     #: Tek istekte gönderilecek satır sayısı. Büyütmek çağrı sayısını azaltır
-    #: ama modelin sırayı kaçırma ihtimalini artırır.
-    batch_size: int = 10
-    timeout: float = 180.0
+    #: ama isteği ağırlaştırır, modelin sırayı kaçırma ihtimalini artırır ve
+    #: ilerleme geri bildirimini seyrekleştirir.
+    batch_size: int = 5
+    #: Tek bir isteğin zaman aşımı. Yüksek tutmak "takıldı mı, çalışıyor mu"
+    #: belirsizliğini uzatır; hızlı başarısız olup tekrar denemek yeğdir.
+    timeout: float = 75.0
     max_retries: int = 3
-    #: Şeritlerin modele gönderileceği piksel yüksekliği.
-    strip_height: int = 96
+    #: Bütün okuma işi için üst sınır. Tek tek zaman aşımları çarpılıp
+    #: kullanıcıyı on beş dakika bekletebiliyordu; bu sınır buna izin vermez.
+    total_deadline: float = 300.0
+    #: Şeritlerin modele gönderileceği en büyük piksel yüksekliği (yalnız
+    #: küçültme yönünde uygulanır).
+    strip_height: int = 64
+    #: İlerleme bildirimi için isteğe bağlı geri çağrı: (biten, toplam).
+    on_progress: object = None
 
     def __post_init__(self) -> None:
         self.api_key = load_api_key(self.api_key)
@@ -111,6 +127,7 @@ class GeminiTranscriber(Transcriber):
 
     def transcribe_lines(self, images: list[np.ndarray]) -> list[LineTranscription]:
         results: list[LineTranscription] = []
+        self._started = time.monotonic()
         for start in range(0, len(images), self.batch_size):
             chunk = images[start : start + self.batch_size]
             for item in self._transcribe_batch(chunk):
@@ -119,7 +136,16 @@ class GeminiTranscriber(Transcriber):
                         index=start + item.index, text=item.text, confidence=item.confidence
                     )
                 )
+            if callable(self.on_progress):
+                self.on_progress(min(start + self.batch_size, len(images)), len(images))
         return results
+
+    def _remaining(self) -> float:
+        """İş için kalan süre; bittiğinde daha fazla deneme yapılmaz."""
+        started = getattr(self, "_started", None)
+        if started is None or self.total_deadline <= 0:
+            return float("inf")
+        return self.total_deadline - (time.monotonic() - started)
 
     # -- iç işleyiş --------------------------------------------------------
 
@@ -154,6 +180,12 @@ class GeminiTranscriber(Transcriber):
         url = ENDPOINT.format(model=self.model)
         last: Exception | None = None
         for attempt in range(self.max_retries):
+            if self._remaining() <= 0:
+                raise AIError(
+                    f"Okuma {self.total_deadline:.0f} saniyede tamamlanamadı. "
+                    "Gemini yanıt vermiyor olabilir; biraz sonra tekrar deneyin "
+                    "ya da daha az sayıda fotoğrafla başlayın."
+                )
             try:
                 response = requests.post(
                     url,
@@ -162,9 +194,16 @@ class GeminiTranscriber(Transcriber):
                     timeout=self.timeout,
                     headers={"Content-Type": "application/json"},
                 )
+            except requests.Timeout as exc:
+                last = AIError(
+                    f"Gemini {self.timeout:.0f} saniyede yanıt vermedi "
+                    f"(deneme {attempt + 1}/{self.max_retries})"
+                )
+                _ = exc
+                continue
             except requests.RequestException as exc:
                 last = exc
-                time.sleep(2**attempt)
+                time.sleep(min(2**attempt, max(0.0, self._remaining())))
                 continue
 
             if response.status_code == 200:
@@ -173,7 +212,7 @@ class GeminiTranscriber(Transcriber):
             # 429 ve 5xx geçicidir; diğerleri tekrar denemeye değmez.
             if response.status_code == 429 or response.status_code >= 500:
                 last = AIError(f"HTTP {response.status_code}: {response.text[:200]}")
-                time.sleep(2**attempt * 2)
+                time.sleep(min(2**attempt * 2, max(0.0, self._remaining())))
                 continue
 
             raise AIError(f"Gemini isteği reddetti (HTTP {response.status_code}): {response.text[:300]}")

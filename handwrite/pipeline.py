@@ -177,6 +177,7 @@ def build_from_freeform(
     transcriber,
     cfg: Config | None = None,
     min_confidence: float = 0.35,
+    progress=None,
 ) -> PipelineResult:
     """Herhangi bir el yazısı sayfasından font üretir — şablon gerekmeden.
 
@@ -190,12 +191,14 @@ def build_from_freeform(
     """
     cfg = cfg or Config()
     diagnostics = Diagnostics()
+    report = progress if callable(progress) else (lambda *a, **k: None)
 
     lines: list[Line] = []
     origin: dict[int, tuple[int, int]] = {}
     strokes: list[float] = []
 
     for page_index, (name, image) in enumerate(images):
+        report(f"Sayfa {page_index + 1}/{len(images)} temizleniyor")
         page = prepare_page(image, None, cfg.preprocess)
         page_lines = detect_lines(page, cfg.line)
         for line in page_lines:
@@ -222,6 +225,11 @@ def build_from_freeform(
 
     # Okuma, eğim düzeltmesinden *önce* yapılır: model yazıyı doğal haliyle
     # daha iyi okur, dikleştirilmiş hali ona tanıdık gelmez.
+    report(f"{len(lines)} satır bulundu, yazı okunuyor")
+    if hasattr(transcriber, "on_progress"):
+        transcriber.on_progress = lambda done, total: report(
+            f"Yazı okunuyor — {done}/{total} satır"
+        )
     readings = transcriber.transcribe_lines([line.ink for line in lines])
     diagnostics.transcriptions = [(r.index, r.text, r.confidence) for r in readings]
 
@@ -239,7 +247,7 @@ def build_from_freeform(
     if not usable:
         raise ValueError("Hiçbir satır okunamadı; fotoğrafın okunaklı olduğundan emin olun.")
 
-    return _finish(usable, origin, diagnostics, cfg)
+    return _finish(usable, origin, diagnostics, cfg, report)
 
 
 def build_from_images(
@@ -264,17 +272,22 @@ def _finish(
     origin: dict[int, tuple[int, int]],
     diagnostics: Diagnostics,
     cfg: Config,
+    progress=None,
 ) -> PipelineResult:
     """Satırlardan fonta giden ortak kuyruk.
 
     Metnin nereden geldiği (şablondan mı, modelden mi) buradan itibaren önemsiz
     olur; iki yol da aynı deterministik zinciri kullanır.
     """
+    report = progress if callable(progress) else (lambda *a, **k: None)
+
     # Eğim bütün sayfalardan ortak hesaplanır: aynı elin yazısı olduğu için
     # sayfa başına ayrı düzeltmek tutarsızlık üretirdi.
+    report("Yazı eğimi ölçülüyor")
     diagnostics.slant = page_slant(lines, limit=cfg.line.slant_limit, coarse=cfg.line.slant_step)
     straight = [deslant_line(line, diagnostics.slant) for line in lines]
 
+    report("Harfler ayrıştırılıyor")
     segmentation = segment_document(straight, diagnostics.stroke_width, cfg.segment)
     diagnostics.rejected_lines.update(
         {origin.get(index, (-1, index)): reason for index, reason in segmentation.rejected.items()}
@@ -299,7 +312,11 @@ def _finish(
     # Tek bir doğal sayfa küçük harfleri bol verir ama büyük harflerin çoğunu,
     # rakamları ve noktalamayı vermez. Eksikleri kullanıcıdan ikinci bir sayfa
     # istemek yerine üretiyoruz.
-    synthesis = fill_missing(library, cfg.font, cfg.glyph) if cfg.synthesize_missing else None
+    if cfg.synthesize_missing:
+        report("Eksik karakterler üretiliyor")
+        synthesis = fill_missing(library, cfg.font, cfg.glyph)
+    else:
+        synthesis = None
 
     present = set(library.characters)
     diagnostics.missing_characters = [ch for ch in CHARSET if ch not in present]
@@ -312,6 +329,7 @@ def _finish(
         if entry.kept < 3
     ]
 
+    report("Font dosyası yazılıyor")
     font, build = build_font(library, cfg.font, cfg.glyph)
     return PipelineResult(
         synthesis=synthesis,

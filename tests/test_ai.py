@@ -258,3 +258,64 @@ def test_anahtar_yoksa_yol_gosteren_hata(monkeypatch, tmp_path):
 def test_acik_anahtar_ortami_ezer(monkeypatch):
     monkeypatch.setenv("GOOGLE_AI_API_KEY", "ortam")
     assert load_api_key("acik") == "acik"
+
+
+# --------------------------------------------------------------------------
+# İstek boyutu
+# --------------------------------------------------------------------------
+
+
+def test_serit_kodlamasi_goruntuyu_buyutmez():
+    """Şeridi sabit yüksekliğe "normalize etmek" isteği şişiriyordu.
+
+    Tipik bir satır maskesi zaten 50-60 piksel yüksekliğindedir. Onu 96'ya
+    çıkarmak hiçbir bilgi katmadan alanı üç katına çıkarıyor, istek gövdesini
+    büyütüyor ve gerçek kullanımda Gemini'nin 180 saniyede yanıt verememesine
+    yol açıyordu. Ölçekleme yalnız küçültme yönünde olmalı.
+    """
+    import base64
+
+    from handwrite.ai.gemini import encode_line
+
+    short = np.zeros((54, 900), bool)
+    short[20:40, 100:800] = True
+    encoded = base64.b64decode(encode_line(short, height=64))
+
+    from io import BytesIO
+
+    from PIL import Image as PILImage
+
+    decoded = PILImage.open(BytesIO(encoded))
+    assert decoded.height == 54, "kısa şerit büyütülmüş"
+    assert decoded.width == 900
+
+    tall = np.zeros((200, 900), bool)
+    tall[50:150, 100:800] = True
+    resized = PILImage.open(BytesIO(base64.b64decode(encode_line(tall, height=64))))
+    assert resized.height == 64, "uzun şerit küçültülmemiş"
+
+
+def test_serit_yuku_makul_kaliyor():
+    """Bir grup istek birkaç yüz kilobayta çıkmamalı."""
+    import base64
+
+    from handwrite.ai.gemini import encode_line
+
+    rng = np.random.default_rng(0)
+    total = 0
+    for _ in range(5):
+        strip = np.zeros((56, 1000), bool)
+        for x in range(0, 1000, 12):
+            strip[18 + rng.integers(0, 6) : 44, x : x + 5] = True
+        total += len(base64.b64decode(encode_line(strip, 64)))
+    assert total < 120_000, f"5 satırlık grup çok büyük: {total / 1024:.0f} KB"
+
+
+def test_toplam_sure_sinirlanmis():
+    """Zaman aşımları çarpılıp kullanıcıyı on beş dakika bekletmemeli."""
+    from handwrite.ai.gemini import GeminiTranscriber
+
+    transcriber = GeminiTranscriber(api_key="sahte")
+    worst_case = transcriber.timeout * transcriber.max_retries
+    assert transcriber.total_deadline < worst_case * 3
+    assert transcriber.total_deadline <= 600
