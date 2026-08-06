@@ -43,6 +43,41 @@ def _resolve_photos(patterns: list[str]) -> tuple[list[Path], list[str]]:
     return resolved, missing
 
 
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic"}
+
+
+def _report_missing(missing: list[str], patterns: list[str]) -> int:
+    """Bulunamayan dosyaları, aynı klasördeki gerçek adlarla birlikte bildirir.
+
+    Kuru bir "bulunamadı" kullanıcıyı yalnız bırakır: dosya adını mı yanlış
+    yazdı, yanlış klasörde mi, uzantı mı farklı — bilemez. Klasördeki görüntü
+    dosyalarını listelemek bu üç sorunun da cevabını bir bakışta verir.
+    """
+    print("Bulunamayan dosya: " + ", ".join(missing), file=sys.stderr)
+
+    folders = {Path(p).parent if Path(p).parent != Path("") else Path(".") for p in patterns}
+    found: list[Path] = []
+    for folder in folders:
+        if folder.is_dir():
+            found.extend(
+                sorted(f for f in folder.iterdir() if f.suffix.lower() in IMAGE_SUFFIXES)
+            )
+
+    if found:
+        print("\nBu klasördeki görüntü dosyaları:", file=sys.stderr)
+        for path in found[:20]:
+            print(f"  {path}", file=sys.stderr)
+        print("\nKomutu bu adlardan biriyle tekrar çalıştırın.", file=sys.stderr)
+    else:
+        print(
+            "\nBu klasörde hiç görüntü dosyası yok. El yazısı fotoğrafını buraya "
+            "kopyalayın ya da tam yolunu verin:\n"
+            "  handwrite read \"C:\\Users\\ad\\Pictures\\yazim.jpg\" -o Benim.ttf",
+            file=sys.stderr,
+        )
+    return 2
+
+
 def _cmd_sheets(args: argparse.Namespace) -> int:
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
@@ -88,8 +123,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     photos, missing = _resolve_photos(args.photos)
     if missing:
-        print("Bulunamayan dosya: " + ", ".join(missing), file=sys.stderr)
-        return 2
+        return _report_missing(missing, args.photos)
     if not photos:
         print("Hiç fotoğraf verilmedi.", file=sys.stderr)
         return 2
@@ -136,8 +170,7 @@ def _cmd_read(args: argparse.Namespace) -> int:
 
     photos, missing = _resolve_photos(args.photos)
     if missing:
-        print("Bulunamayan dosya: " + ", ".join(missing), file=sys.stderr)
-        return 2
+        return _report_missing(missing, args.photos)
     if not photos:
         print("Hiç fotoğraf verilmedi.", file=sys.stderr)
         return 2
