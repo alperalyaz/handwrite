@@ -266,6 +266,94 @@ def extract_ink(
 
 
 # --------------------------------------------------------------------------
+# Kağıdın zeminden ayrılması (serbest mod)
+# --------------------------------------------------------------------------
+
+
+def detect_paper(gray: np.ndarray, min_area: float = 0.25, max_area: float = 0.995) -> np.ndarray | None:
+    """Fotoğraftaki kağıdı bulup dikdörtgene oturtur; bulamazsa None döner.
+
+    Şablon modunda kağıdın nerede olduğunu köşe işaretleri söylüyordu. Serbest
+    modda böyle bir bilgi yok ve kağıdın *dışını* işlemeye devam etmek ölümcül:
+    masa, gölge, kağıt kenarı — hepsi mürekkep sanılır. Ölçtüğümüz kadarıyla
+    koyu bir masada (ton ~45) satır tespiti 6 satır yerine 226 satır buluyor ve
+    her "satır" birkaç piksellik bir kırıntı oluyor; font da kırıntılardan
+    oluşuyor.
+
+    Kağıt, kadrajın en büyük *parlak* dörtgenidir. Dört köşesi bulunabilirse
+    perspektif de düzeltilir — telefonla eğik çekilmiş sayfa düzleşir.
+    """
+    height, width = gray.shape
+    scale = 900.0 / max(height, width)
+    small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else gray
+
+    blurred = cv2.GaussianBlur(small, (0, 0), 3.0)
+    # Otsu, "parlak kağıt" ile "koyu zemin" arasını ayırır. Kağıt üstündeki
+    # yazı azınlıkta kaldığı için bu ayrım kağıdın kendisini verir.
+    _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    biggest = max(contours, key=cv2.contourArea)
+    fraction = cv2.contourArea(biggest) / float(small.shape[0] * small.shape[1])
+    # Kadrajın neredeyse tamamıysa zaten kağıt doludur, kırpmaya gerek yok;
+    # çok küçükse bulduğumuz şey kağıt değildir.
+    if not (min_area <= fraction <= max_area):
+        return None
+
+    back = 1.0 / scale if scale < 1 else 1.0
+    perimeter = cv2.arcLength(biggest, True)
+    approximation = cv2.approxPolyDP(biggest, 0.02 * perimeter, True)
+
+    if len(approximation) == 4:
+        corners = _order_corners(approximation.reshape(4, 2).astype(np.float32) * back)
+        return _warp_to_rectangle(gray, corners)
+
+    x, y, w, h = cv2.boundingRect(biggest)
+    x, y, w, h = int(x * back), int(y * back), int(w * back), int(h * back)
+    pad = int(min(w, h) * 0.01)
+    x0, y0 = max(0, x + pad), max(0, y + pad)
+    x1, y1 = min(width, x + w - pad), min(height, y + h - pad)
+    if x1 - x0 < width * 0.2 or y1 - y0 < height * 0.2:
+        return None
+    return gray[y0:y1, x0:x1]
+
+
+def _order_corners(points: np.ndarray) -> np.ndarray:
+    """Dört köşeyi sol-üst, sağ-üst, sağ-alt, sol-alt sırasına dizer."""
+    ordered = np.zeros((4, 2), dtype=np.float32)
+    total = points.sum(axis=1)
+    diff = np.diff(points, axis=1).ravel()
+    ordered[0] = points[np.argmin(total)]
+    ordered[2] = points[np.argmax(total)]
+    ordered[1] = points[np.argmin(diff)]
+    ordered[3] = points[np.argmax(diff)]
+    return ordered
+
+
+def _warp_to_rectangle(gray: np.ndarray, corners: np.ndarray) -> np.ndarray:
+    """Dört köşesi bilinen kağıdı düz bir dikdörtgene açar."""
+    top = np.linalg.norm(corners[1] - corners[0])
+    bottom = np.linalg.norm(corners[2] - corners[3])
+    left = np.linalg.norm(corners[3] - corners[0])
+    right = np.linalg.norm(corners[2] - corners[1])
+
+    width = int(round(max(top, bottom)))
+    height = int(round(max(left, right)))
+    if width < 100 or height < 100:
+        return gray
+
+    target = np.array(
+        [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype=np.float32
+    )
+    matrix = cv2.getPerspectiveTransform(corners, target)
+    return cv2.warpPerspective(gray, matrix, (width, height), flags=cv2.INTER_CUBIC)
+
+
+# --------------------------------------------------------------------------
 # Basılı cetvel çizgilerinin temizlenmesi (serbest mod)
 # --------------------------------------------------------------------------
 
@@ -436,7 +524,14 @@ def prepare_page(
             stroke_width=estimate_stroke_width(ink),
         )
 
-    # Serbest mod: ölçekle, cetvel çizgilerini temizle, eğikliği düzelt.
+    # Serbest mod: önce kağıdı zeminden ayır. Kağıdın dışını işlemeye devam
+    # etmek masayı, gölgeyi ve kağıt kenarını mürekkep sayar; koyu bir masada
+    # satır tespiti tamamen çöker.
+    if cfg.detect_paper:
+        cropped = detect_paper(image)
+        if cropped is not None:
+            image = cropped
+
     if cfg.target_short_side:
         scale = cfg.target_short_side / min(image.shape[:2])
         if scale < 1.0:

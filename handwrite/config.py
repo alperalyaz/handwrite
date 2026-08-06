@@ -125,6 +125,12 @@ class PreprocessConfig:
     #: koyu olması gerektiği; kağıt seviyesinin oranı olarak. Küçültmek soluk
     #: kalemleri yakalar ama basılı içeriği sızdırma riskini artırır.
     ink_margin_ratio: float = 0.22
+    #: Serbest modda kağıdı zeminden ayırıp yalnız onu işle.
+    #:
+    #: Kapatmak yalnız kadrajın tamamı zaten kağıtsa (düz tarama) anlamlıdır.
+    #: Fotoğrafta kağıdın dışı işlenmeye devam ederse masa, gölge ve kağıt
+    #: kenarı mürekkep sanılır.
+    detect_paper: bool = True
     #: Serbest modda eşiğin kalem tonuna doğru ne kadar sıkılacağı.
     #:
     #: 0 = Otsu eşiği (kağıt olmayan her şey mürekkep; defter çizgileri de dahil),

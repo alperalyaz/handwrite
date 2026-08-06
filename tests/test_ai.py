@@ -319,3 +319,49 @@ def test_toplam_sure_sinirlanmis():
     worst_case = transcriber.timeout * transcriber.max_retries
     assert transcriber.total_deadline < worst_case * 3
     assert transcriber.total_deadline <= 600
+
+
+# --------------------------------------------------------------------------
+# Kağıdın zeminden ayrılması
+# --------------------------------------------------------------------------
+
+
+def _on_desk(page: np.ndarray, level: int, margin: float = 0.12) -> np.ndarray:
+    """Sayfayı belirli tonda bir masanın üstüne koyar."""
+    import numpy as _np
+
+    height, width = page.shape
+    pad_x, pad_y = int(width * margin), int(height * margin)
+    desk = _np.full((height + 2 * pad_y, width + 2 * pad_x), level, _np.uint8)
+    noise = _np.random.default_rng(1).normal(0, 6, desk.shape)
+    desk = _np.clip(desk + noise, 0, 255).astype(_np.uint8)
+    desk[pad_y : pad_y + height, pad_x : pad_x + width] = page
+    return desk
+
+
+@pytest.mark.parametrize("desk", [200, 120, 45, 25])
+def test_koyu_zeminde_satirlar_bozulmuyor(notebook, desk):
+    """Kağıdın dışını işlemek satır tespitini tamamen çökertiyordu.
+
+    Koyu bir masada (ton ~45) masa, gölge ve kağıt kenarı mürekkep sanılıyor,
+    6 satırlık bir sayfada 226 "satır" bulunuyor ve her biri birkaç piksellik
+    bir kırıntı oluyordu. Font da o kırıntılardan oluşuyordu.
+    """
+    page = prepare_page(_on_desk(notebook.canonical, desk), None, Config().preprocess)
+    lines = detect_lines(page, Config().line)
+
+    assert len(lines) == len(SAMPLE), f"masa tonu {desk}: {len(lines)} satır bulundu"
+    heights = [line.xheight for line in lines]
+    assert min(heights) > 15, "satırlar kırıntıya dönüşmüş"
+    assert max(heights) / min(heights) < 1.5
+
+
+def test_kagit_algilama_zaten_dolu_kadraji_bozmaz(notebook):
+    """Kadrajın tamamı kağıtsa kırpmaya gerek yok; yanlışlıkla kırpmamalı."""
+    from handwrite.preprocess import detect_paper
+
+    result = detect_paper(notebook.canonical)
+    if result is not None:
+        height, width = notebook.canonical.shape
+        assert result.shape[0] > height * 0.7
+        assert result.shape[1] > width * 0.7
