@@ -145,7 +145,11 @@ def _diagnostics_payload(result) -> dict:
     diagnostics = result.diagnostics
     payload = {
         "ok": True,
-        "summary": diagnostics.summary_lines(),
+        # Uyarılar özetten ayrı taşınır: metin dökümünün içinde kaybolduklarında
+        # kimse okumuyor, oysa çoğu ("fotoğraf çok küçük") kullanıcının tek
+        # hamlede düzeltebileceği ve sonucu belirleyen şeyler.
+        "warnings": diagnostics.warnings,
+        "summary": diagnostics.summary_lines(include_warnings=False),
         "characters": result.build.characters,
         "glyphs": result.build.glyph_count,
         "missing": diagnostics.missing_characters,
@@ -455,6 +459,10 @@ INDEX_HTML = """
             border-radius:10px; padding:16px; white-space:pre-wrap; margin-top:12px; }
   img.preview { max-width:100%; border:1px solid var(--line); border-radius:10px; margin-top:14px; }
   .bad { color:var(--bad); } .warn { color:var(--warn); }
+  #warn { border:1px solid var(--warn); border-radius:10px; padding:14px 16px; margin-top:14px;
+          background:color-mix(in srgb,var(--warn) 10%,transparent); font-size:14px; line-height:1.6; }
+  #warn p { margin:0 0 8px; } #warn p:last-child { margin-bottom:0; }
+  #warn b { color:var(--warn); }
   .muted { color:var(--dim); font-size:14px; }
   video { width:100%; max-width:420px; border-radius:10px; border:1px solid var(--line); }
   .hidden { display:none !important; }
@@ -544,6 +552,7 @@ INDEX_HTML = """
       <div class="bar"><i></i></div>
       <div class="muted" id="hint" style="margin-top:8px"></div>
     </div>
+    <div id="warn" class="hidden"></div>
     <pre id="log"></pre>
   </div>
 
@@ -717,6 +726,16 @@ $('go').onclick = async () => {
   const d = await poll(job);
   $('go').disabled = false; showProgress(false);
   if (!d) return;
+
+  // Uyarı varsa font yine üretilir ama beklenenden kötü olur; kullanıcının
+  // bunu indirmeden önce görmesi gerek.
+  if (d.warnings && d.warnings.length) {
+    $('warn').innerHTML = '<p><b>Dikkat</b></p>'
+      + d.warnings.map(w => '<p>' + w.replace(/[<&]/g, c => c === '<' ? '&lt;' : '&amp;') + '</p>').join('');
+    $('warn').classList.remove('hidden');
+  } else {
+    $('warn').classList.add('hidden');
+  }
 
   let out = d.summary.join('\\n');
   if (d.page_errors.length) out += '\\n\\n! ' + d.page_errors.join('\\n! ');

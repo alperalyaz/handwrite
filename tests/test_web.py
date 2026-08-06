@@ -150,3 +150,37 @@ def test_uzun_is_ilerleme_bildirir(client):
 
 def test_olmayan_is_sorgulanamaz(client):
     assert client.get("/api/job/olmayan").status_code == 404
+
+
+def test_uyarilar_ozetten_ayri_tasiniyor():
+    """Uyarı metin dökümünün içinde kaybolmamalı; ayrı alanda gelmeli.
+
+    "Fotoğraf çok küçük" gibi uyarılar kullanıcının tek hamlede düzeltebileceği
+    şeyler; log'un ortasına gömülürse okunmuyor ve kötü fontun sebebi
+    anlaşılmıyor.
+    """
+    from types import SimpleNamespace
+
+    from handwrite.pipeline import Diagnostics
+    from handwrite.web import _diagnostics_payload
+
+    diagnostics = Diagnostics()
+    diagnostics.warnings.append("Yazı fotoğrafta çok küçük görünüyor")
+    result = SimpleNamespace(
+        diagnostics=diagnostics,
+        build=SimpleNamespace(characters=10, glyph_count=12),
+        synthesis=None,
+    )
+
+    payload = _diagnostics_payload(result)
+    assert payload["warnings"] == ["Yazı fotoğrafta çok küçük görünüyor"]
+    assert not any("çok küçük" in row for row in payload["summary"]), (
+        "uyarı hem özette hem uyarı alanında tekrarlanıyor"
+    )
+
+
+def test_uyari_arayuzde_gosteriliyor(client):
+    """Uyarı alanı sayfada var ve dolduruluyor olmalı."""
+    page = client.get("/").text
+    assert 'id="warn"' in page
+    assert "d.warnings" in page

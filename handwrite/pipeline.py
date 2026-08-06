@@ -59,9 +59,15 @@ class Diagnostics:
     synthetic_characters: list[str] = field(default_factory=list)
     #: Glif denetiminin sonucu (denetim yapıldıysa).
     verification: object = None
+    #: Kullanıcıya gösterilecek uyarılar (sonucu bozan ama düzeltilebilir
+    #: durumlar).
+    warnings: list[str] = field(default_factory=list)
 
-    def summary_lines(self) -> list[str]:
-        rows = [
+    def summary_lines(self, include_warnings: bool = True) -> list[str]:
+        """Özet satırları. Uyarıları ayrı gösteren arayüzler bunları isteyip
+        tekrar etmemek için ``include_warnings=False`` geçer."""
+        rows = list(self.warnings) if include_warnings else []
+        rows += [
             f"sayfa: {len([p for p in self.pages if p.error is None])}/{len(self.pages)} okundu",
             f"eğim: {self.slant:.1f}°   kalem: {self.stroke_width:.1f} px   x-yüksekliği: {self.xheight_px:.0f} px",
             f"toplam karakter örneği: {self.total_samples}",
@@ -234,6 +240,8 @@ def build_from_freeform(
             "kağıttan belirgin şekilde koyu olduğundan emin olun."
         )
 
+    _check_resolution(lines, diagnostics)
+
     diagnostics.stroke_width = float(np.median(strokes)) if strokes else 1.0
 
     # Okuma, eğim düzeltmesinden *önce* yapılır: model yazıyı doğal haliyle
@@ -374,6 +382,34 @@ def _finish(
         diagnostics=diagnostics,
         segmentation=segmentation,
     )
+
+
+#: Segmentasyonun güvenilir çalıştığı en küçük x-yüksekliği (piksel).
+#: Altında harfler birbirinden ayırt edilemeyecek kadar az piksele düşer.
+MIN_XHEIGHT_PX = 26.0
+
+
+def _check_resolution(lines: list[Line], diagnostics: Diagnostics) -> None:
+    """Yazının piksel olarak yeterince büyük olup olmadığını denetler.
+
+    Çözünürlük, kullanıcının kolayca düzeltebileceği ama sonucu belirleyen bir
+    etken. 1,4 MP'lik bir fotoğrafta A4 sayfa 4,8 piksel/mm'ye düşer ve tipik
+    bir el yazısının x-yüksekliği 14 piksel eder — bir harfin gövdesine 14
+    piksel düştüğünde kesim yerini birkaç piksel şaşırmak harfin yarısını
+    götürür. Bunu sessizce kötü bir font üreterek geçiştirmek yerine söylüyoruz.
+    """
+    heights = [line.xheight for line in lines if line.xheight > 0]
+    if not heights:
+        return
+    measured = float(np.median(heights))
+    diagnostics.xheight_px = measured
+    if measured < MIN_XHEIGHT_PX:
+        diagnostics.warnings.append(
+            f"Yazı fotoğrafta çok küçük görünüyor (x-yüksekliği {measured:.0f} piksel, "
+            f"gereken en az {MIN_XHEIGHT_PX:.0f}). Harfler ayrıştırılamayacak kadar az "
+            "piksele düşüyor. Daha yüksek çözünürlükte çekin ya da sayfaya daha "
+            "yakından, kağıdı kadraja tam sığdıracak şekilde fotoğraflayın."
+        )
 
 
 def _measure_space(
