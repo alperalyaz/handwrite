@@ -131,6 +131,18 @@ class PreprocessConfig:
     #: Fotoğrafta kağıdın dışı işlenmeye devam ederse masa, gölge ve kağıt
     #: kenarı mürekkep sanılır.
     detect_paper: bool = True
+    #: Kağıt kırpmasının korumak zorunda olduğu mürekkep oranı.
+    #:
+    #: Bu oranın altına düşen bir kırpma uygulanmaz. Kağıt algılama akla
+    #: gelmeyecek biçimlerde yanılabilir (gölge sayfayı ikiye böler, masadaki
+    #: beyaz bir nesne sayfa sanılır); hepsinin sonucu yazının bir kısmının
+    #: çöpe gitmesidir. Sebebi tek tek kovalamak yerine sonucu denetliyoruz.
+    #:
+    #: Yakalanmak istenen şey ince ayar değil felaket, ve ölçümde iki durum
+    #: birbirinden çok uzak: doğru bir kırpma 0,999 veriyor (hem sentetik hem
+    #: gerçek fotoğrafta), sayfanın yarısını atan bir kırpma 0,44-0,61. Eşik
+    #: aradaki geniş boşluğa konuyor.
+    paper_min_ink_kept: float = 0.85
     #: Serbest modda eşiğin kalem tonuna doğru ne kadar sıkılacağı.
     #:
     #: 0 = Otsu eşiği (kağıt olmayan her şey mürekkep; defter çizgileri de dahil),

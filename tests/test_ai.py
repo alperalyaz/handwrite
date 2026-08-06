@@ -360,8 +360,103 @@ def test_kagit_algilama_zaten_dolu_kadraji_bozmaz(notebook):
     """Kadrajın tamamı kağıtsa kırpmaya gerek yok; yanlışlıkla kırpmamalı."""
     from handwrite.preprocess import detect_paper
 
-    result = detect_paper(notebook.canonical)
-    if result is not None:
+    found = detect_paper(notebook.canonical)
+    if found is not None:
+        cropped, _ = found
         height, width = notebook.canonical.shape
-        assert result.shape[0] > height * 0.7
-        assert result.shape[1] > width * 0.7
+        assert cropped.shape[0] > height * 0.7
+        assert cropped.shape[1] > width * 0.7
+
+
+@pytest.mark.parametrize("desk", [200, 120, 45, 25])
+def test_murekkep_olcusu_zeminden_etkilenmiyor(notebook, desk):
+    """Kırpmayı denetleyen mürekkep ölçüsü masanın tonuna bağlı olmamalı.
+
+    Bu denetim ("kırpma yazının çoğunu koruyor mu?") ancak masayı mürekkep
+    saymazsa işe yarar. Sayarsa tam ters etki yapar: doğru kırpma "mürekkebin
+    %92'sini attı" diye reddedilir ve koyu masa sorunu geri gelir. Ölçüldü,
+    oran tabanlı bir eşikle tam bunu yapıyordu — ton 25'teki ±6'lık kamera
+    gürültüsü masanın yarısını mürekkep gösteriyordu.
+    """
+    from handwrite.preprocess import _ink_mask
+
+    plain = _ink_mask(notebook.canonical).sum()
+    on_desk = _ink_mask(_on_desk(notebook.canonical, desk)).sum()
+
+    assert plain > 0
+    assert abs(int(on_desk) - int(plain)) < plain * 0.02, (
+        f"masa tonu {desk}: zemin mürekkep sayımını {on_desk / plain:.2f} katına çıkardı"
+    )
+
+
+@pytest.mark.parametrize("desk", [200, 120, 45, 25])
+def test_dogru_kirpma_denetimden_geciyor(notebook, desk):
+    """Kağıt algılamanın bulduğu doğru kırpma güvenlik denetimine takılmamalı.
+
+    Denetim yanlış kırpmayı elemek için var; doğru kırpmayı elerse kağıt
+    algılama hiç yokmuş gibi olur.
+    """
+    from handwrite.preprocess import _keeps_ink, detect_paper
+
+    image = _on_desk(notebook.canonical, desk)
+    found = detect_paper(image)
+    assert found is not None, f"masa tonu {desk}: kağıt bulunamadı"
+    _, region = found
+    assert _keeps_ink(image, region, Config().preprocess.paper_min_ink_kept)
+
+
+def _shadowed(page: np.ndarray, depth: float, sigma: float) -> np.ndarray:
+    """Sayfanın ortasına dikey bir gölge bandı düşürür."""
+    image = _on_desk(page, 60).astype(np.float32)
+    width = image.shape[1]
+    column = np.arange(width)
+    band = 1.0 - depth * np.exp(-(((column - width * 0.5) / (width * sigma)) ** 2))
+    return np.clip(image * band[None, :], 0, 255).astype(np.uint8)
+
+
+@pytest.mark.parametrize("depth,sigma", [(0.45, 0.06), (0.55, 0.10), (0.65, 0.10)])
+def test_golgeli_sayfa_ikiye_bolunmuyor(notebook, depth, sigma):
+    """Sayfanın ortasından geçen gölge kağıdı yarıya indirmemeli.
+
+    Gerçek bir fotoğrafta bu olmuştu: gölge bandı Otsu eşiğinin altında kaldı,
+    "en büyük parlak bölge" sayfanın sağ %53'ü çıktı ve mürekkebin %44'ü
+    silindi. Satırlar yarım okundu, glifler yarım harflerden oluştu.
+
+    Buradaki parametreler kağıdı gerçekten ikiye bölecek kadar sert seçildi:
+    daha yumuşak bir gölgede en büyük parlak bölge zaten sayfanın tamamı çıkıyor
+    ve test hiçbir şey kanıtlamıyor. Bu derinliklerde birinci aday kadrajın
+    %29-36'sına düşüyor; sayfayı bütün hâlinde geri veren şey ikinci aday.
+    """
+    from handwrite.preprocess import detect_paper
+
+    shaded = _shadowed(notebook.canonical, depth, sigma)
+    found = detect_paper(shaded)
+    assert found is not None, "gölgeli sayfada kağıt bulunamadı"
+    _, region = found
+    columns = np.nonzero(region.any(axis=0))[0]
+    span = (columns.max() - columns.min()) / shaded.shape[1]
+    assert span > 0.7, f"kağıt gölgede {span:.2f} genişliğe düştü"
+
+
+def test_golgede_bolunen_sayfa_ilk_adayla_kirpilmiyor(notebook):
+    """Gölgede bölünen sayfada birinci adayın gerçekten yetersiz olduğunu gösterir.
+
+    Testin kendisi bir şey kanıtlamalı: ikinci aday olmasa sonucun bozuk
+    olacağını doğrulamazsa, birinci aday zaten yetiyor olabilir ve test boşa
+    geçiyordur.
+    """
+    from handwrite.preprocess import _ink_mask, _paper_candidates
+
+    shaded = _shadowed(notebook.canonical, 0.55, 0.10)
+    candidates = _paper_candidates(shaded, 0.25, 0.995)
+    assert len(candidates) >= 2, "gölge sayfayı bölmemiş; test bir şey sınamıyor"
+
+    ink = _ink_mask(shaded)
+    total = max(int(ink.sum()), 1)
+    first = int((ink & candidates[0][0]).sum()) / total
+    second = int((ink & candidates[1][0]).sum()) / total
+
+    assert first < Config().preprocess.paper_min_ink_kept, (
+        f"birinci aday mürekkebin {first:.2f}'sini koruyor; gölge sorunu üretmemiş"
+    )
+    assert second > 0.95, f"ikinci aday da mürekkebi kurtaramıyor ({second:.2f})"

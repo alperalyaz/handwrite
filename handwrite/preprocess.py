@@ -270,7 +270,12 @@ def extract_ink(
 # --------------------------------------------------------------------------
 
 
-def detect_paper(gray: np.ndarray, min_area: float = 0.25, max_area: float = 0.995) -> np.ndarray | None:
+def detect_paper(
+    gray: np.ndarray,
+    min_area: float = 0.25,
+    max_area: float = 0.995,
+    min_ink_kept: float | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
     """Fotoğraftaki kağıdı bulup dikdörtgene oturtur; bulamazsa None döner.
 
     Şablon modunda kağıdın nerede olduğunu köşe işaretleri söylüyordu. Serbest
@@ -280,46 +285,194 @@ def detect_paper(gray: np.ndarray, min_area: float = 0.25, max_area: float = 0.9
     her "satır" birkaç piksellik bir kırıntı oluyor; font da kırıntılardan
     oluşuyor.
 
-    Kağıt, kadrajın en büyük *parlak* dörtgenidir. Dört köşesi bulunabilirse
+    Kağıt, kadrajın en büyük *parlak* bölgesidir. Dört köşesi bulunabilirse
     perspektif de düzeltilir — telefonla eğik çekilmiş sayfa düzleşir.
+
+    Tek bir aday üretip ona güvenmiyoruz. "En büyük parlak bölge" sayfanın
+    üstünden geçen bir gölge yüzünden sayfanın yalnız bir yarısı olabilir;
+    ölçülen gerçek bir fotoğrafta bu, mürekkebin %44'ünü çöpe atıyordu. Bu
+    yüzden birkaç aday üretilip her biri ölçülebilir bir ölçütle sınanır:
+    *yazının ne kadarı içeride kalıyor?* İlk geçen aday kullanılır, adaylar
+    dardan genişe sıralanır (dar kırpma daha çok işe yarar, ama yazıyı kesen
+    dar kırpma hiç işe yaramaz).
+
+    Döndürür: (kırpılmış görüntü, özgün koordinatlardaki bölge maskesi) ya da
+    None. Bölge maskesi, kırpmanın yazıyı koruyup korumadığını denetlemek için
+    gerekir: iki görüntüde ayrı ayrı mürekkep saymak kararsızdır, hangi
+    piksellerin içeride kaldığını saymak kesindir.
+    """
+    if min_ink_kept is None:
+        min_ink_kept = PreprocessConfig().paper_min_ink_kept
+
+    for region, corners in _paper_candidates(gray, min_area, max_area):
+        if not _keeps_ink(gray, region, min_ink_kept):
+            continue
+
+        # Kağıdın *dışını* beyazlatmak, kırpmaktan farklı ve daha önemlidir.
+        # Kırpma yalnız dikdörtgen bir sınır koyar; masanın köşelerde kalan
+        # koyu parçaları içeride kalmaya devam eder. Ölçülen bir fotoğrafta
+        # mürekkebin yarısı bu artıklardan geliyordu ve satır tespiti tamamen
+        # çöküyordu.
+        cleaned = np.where(region, gray, 255).astype(np.uint8)
+
+        if corners is not None:
+            return _warp_to_rectangle(cleaned, corners), region
+
+        ys, xs = np.nonzero(region)
+        return cleaned[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1], region
+
+    return None
+
+
+def _paper_candidates(
+    gray: np.ndarray, min_area: float, max_area: float
+) -> list[tuple[np.ndarray, np.ndarray | None]]:
+    """Kağıt olabilecek bölgeleri dardan genişe üretir.
+
+    İki aday var, ikisi de aynı parlaklık eşiğinden türüyor ama farklı
+    varsayımla:
+
+    1. **En büyük parlak bölge.** Kağıt tek parça göründüğünde doğru olan ve en
+       dar kırpmayı veren aday.
+    2. **Parlak parçaların dışbükey örtüsü.** Sayfanın üstünden geçen bir gölge
+       kağıdı eşiğin iki yakasına düşürdüğünde kağıt iki ayrı parçaya bölünür;
+       o iki parçanın örtüsü sayfanın kendisidir. Ölçüldü: %45 derinlikte bir
+       gölgede birinci aday kadrajın %38'ine düşüyor, örtü sayfayı bütün
+       hâlinde geri veriyor.
+
+    Örtü fazla kapsayabilir (masada duran başka bir beyaz nesne içeri girer).
+    Bunun bedeli kırpmanın daha az işe yaramasıdır — yazı kaybı değil; o yüzden
+    ikinci sıradadır, birincisi yazıyı kesmediği sürece kullanılmaz.
     """
     height, width = gray.shape
     scale = 900.0 / max(height, width)
     small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else gray
 
-    blurred = cv2.GaussianBlur(small, (0, 0), 3.0)
     # Otsu, "parlak kağıt" ile "koyu zemin" arasını ayırır. Kağıt üstündeki
     # yazı azınlıkta kaldığı için bu ayrım kağıdın kendisini verir.
+    #
+    # Aydınlatma burada bilerek *düzeltilmez*: kağıdı zeminden ayıran şey zaten
+    # büyük ölçekli parlaklık farkıdır ve onu düzleştirmek aranan sinyali siler.
+    # Ölçüldü — düzleştirilince koyu masada (ton 25) "en büyük parlak bölge"
+    # kadrajın %100'ü çıkıyor, yani kağıt hiç bulunamıyor.
+    blurred = cv2.GaussianBlur(small, (0, 0), 3.0)
     _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    # Kapama, gölgenin açtığı *ince* çatlakları kapatır. Ölçülen fotoğrafta
+    # 9x9 kare çekirdek sayfanın %53'ünü alıyordu, 25'lik elips %97'sini.
+    # Geniş bir gölge bandını kapatmaya yetmez — orada ikinci aday devreye girer.
+    mask = cv2.morphologyEx(
+        mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+    )
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return None
+        return []
 
-    biggest = max(contours, key=cv2.contourArea)
-    fraction = cv2.contourArea(biggest) / float(small.shape[0] * small.shape[1])
-    # Kadrajın neredeyse tamamıysa zaten kağıt doludur, kırpmaya gerek yok;
-    # çok küçükse bulduğumuz şey kağıt değildir.
-    if not (min_area <= fraction <= max_area):
-        return None
-
+    frame = float(small.shape[0] * small.shape[1])
     back = 1.0 / scale if scale < 1 else 1.0
-    perimeter = cv2.arcLength(biggest, True)
-    approximation = cv2.approxPolyDP(biggest, 0.02 * perimeter, True)
+    candidates: list[tuple[np.ndarray, np.ndarray | None]] = []
+
+    shapes = [max(contours, key=cv2.contourArea)]
+    # Gölgede bölünen sayfanın parçaları; kırıntılar örtüyü şişirmesin diye
+    # kadrajın %5'inden küçük olanlar alınmaz.
+    pieces = [c for c in contours if cv2.contourArea(c) >= frame * 0.05]
+    if len(pieces) > 1:
+        shapes.append(cv2.convexHull(np.vstack(pieces)))
+
+    for shape in shapes:
+        fraction = cv2.contourArea(shape) / frame
+        # Kadrajın neredeyse tamamıysa zaten kağıt doludur, kırpmaya gerek yok;
+        # çok küçükse bulduğumuz şey kağıt değildir.
+        if not (min_area <= fraction <= max_area):
+            continue
+        built = _region_from_contour(shape, back, height, width)
+        if built is not None:
+            candidates.append(built)
+    return candidates
+
+
+def _region_from_contour(
+    shape: np.ndarray, back: float, height: int, width: int
+) -> tuple[np.ndarray, np.ndarray | None] | None:
+    """Küçültülmüş görüntüdeki bir konturu tam çözünürlükte bölge maskesine çevirir."""
+    region = np.zeros((height, width), np.uint8)
+    approximation = cv2.approxPolyDP(shape, 0.02 * cv2.arcLength(shape, True), True)
 
     if len(approximation) == 4:
         corners = _order_corners(approximation.reshape(4, 2).astype(np.float32) * back)
-        return _warp_to_rectangle(gray, corners)
+        cv2.fillConvexPoly(region, corners.astype(np.int32), 1)
+    else:
+        x, y, w, h = cv2.boundingRect(shape)
+        x, y, w, h = int(x * back), int(y * back), int(w * back), int(h * back)
+        if w < width * 0.2 or h < height * 0.2:
+            return None
+        region[max(0, y) : y + h, max(0, x) : x + w] = 1
+        corners = None
 
-    x, y, w, h = cv2.boundingRect(biggest)
-    x, y, w, h = int(x * back), int(y * back), int(w * back), int(h * back)
-    pad = int(min(w, h) * 0.01)
-    x0, y0 = max(0, x + pad), max(0, y + pad)
-    x1, y1 = min(width, x + w - pad), min(height, y + h - pad)
-    if x1 - x0 < width * 0.2 or y1 - y0 < height * 0.2:
+    # Kağıdın kenarı fotoğrafta koyu bir şerit olarak görünür (gölge ve kağıdın
+    # kalınlığı). Bölgeyi biraz içeri çekmek o şeridi dışarıda bırakır.
+    inset = max(3, int(min(height, width) * 0.012))
+    region = cv2.erode(region, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inset * 2 + 1,) * 2))
+    mask = region > 0
+    if not mask.any():
         return None
-    return gray[y0:y1, x0:x1]
+    return mask, corners
+
+
+#: Bir pikselin "kalem izi" sayılması için çevresinden kaç ton koyu olması
+#: gerektiği. Kamera gürültüsü (σ≈6) ile kağıt üstündeki mürekkep (150+ ton)
+#: arasında geniş bir boşluk var; eşiğin yeri kritik değil, yeter ki gürültünün
+#: birkaç katı olsun. Gölgede kalmış soluk yazı bile 100'ün üstünde kalıyor.
+_INK_CONTRAST = 40
+
+
+def _ink_mask(gray: np.ndarray) -> np.ndarray:
+    """Kaba bir yazı maskesi — yalnız kırpmayı denetlemek için.
+
+    Koyu piksel saymak burada yetmez: kağıdın dışındaki masa da koyudur ve
+    sayıma girerse "kırpma mürekkep kaybediyor" sonucu çıkar; oysa kaybedilen
+    şey masadır. Kalem izini masadan ayıran şey *incelik*: bir harf darbesi
+    birkaç piksel kalınlığındadır, masa ise geniş bir alandır. Kalem
+    kalınlığından büyük bir çekirdekle kapama yapıp farka bakmak ikisini
+    ayırır: "kara şapka" (blackhat) her pikselin yakın çevresindeki en parlak
+    yapıdan ne kadar koyu olduğunu verir. Kalem izi, üstünde durduğu kağıttan
+    çok koyudur; masanın ortasındaki bir piksel ise komşularıyla aynıdır.
+
+    Fark *mutlak* ölçülür, orana bölünerek değil. Oran, koyu bir zeminde
+    gürültüyü uçuruyordu: ton 25 üstündeki ±6'lık kamera gürültüsü %24'lük bir
+    değişim demek ve masanın yarısı "mürekkep" çıkıyordu — ölçüldü, doğru bir
+    kırpmada bile mürekkebin %92'si masadan geliyor görünüyordu.
+    """
+    size = max(9, int(min(gray.shape) * 0.02) | 1)
+    element = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+    contrast = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, element)
+    return contrast > _INK_CONTRAST
+
+
+def _keeps_ink(gray: np.ndarray, region: np.ndarray, minimum: float) -> bool:
+    """Kırpmanın yazının çoğunu koruyup korumadığını denetler.
+
+    Kağıt algılama tek bir şekilde değil, akla gelmeyecek biçimlerde
+    yanılabilir: gölge sayfayı ikiye böler, kağıdın bir kısmı kadraj dışında
+    kalır, masadaki başka bir beyaz nesne sayfa sanılır. Hepsinin ortak
+    sonucu aynıdır — yazının bir kısmı çöpe gider ve font onsuz üretilir.
+
+    Bu yüzden kırpmanın *sebebini* değil *sonucunu* denetliyoruz: mürekkebin
+    belirgin bir kısmını kaybeden aday elenir, sıradaki daha geniş aday denenir,
+    hiçbiri geçmezse kırpma yapılmaz. Kırpmamak, yanlış kırpmaktan iyidir;
+    kırpmanın çözdüğü sorun (koyu masa) kırpmasız da kısmen çözülebilir, ama
+    yazının yarısı gittiğinde yapılacak bir şey kalmaz.
+
+    Ölçüm, iki görüntüde ayrı ayrı mürekkep sayarak değil, tek bir maskenin ne
+    kadarının bölge içinde kaldığına bakarak yapılır; ayrı sayım, eşik her
+    görüntüde yeniden hesaplandığı için kırpma doğruyken bile %10'a varan fark
+    üretiyordu.
+    """
+    ink = _ink_mask(gray)
+    total = int(ink.sum())
+    if total <= 0:
+        return True
+    return int((ink & region).sum()) / total >= minimum
 
 
 def _order_corners(points: np.ndarray) -> np.ndarray:
@@ -528,9 +681,9 @@ def prepare_page(
     # etmek masayı, gölgeyi ve kağıt kenarını mürekkep sayar; koyu bir masada
     # satır tespiti tamamen çöker.
     if cfg.detect_paper:
-        cropped = detect_paper(image)
-        if cropped is not None:
-            image = cropped
+        found = detect_paper(image, min_ink_kept=cfg.paper_min_ink_kept)
+        if found is not None:
+            image = found[0]
 
     if cfg.target_short_side:
         scale = cfg.target_short_side / min(image.shape[:2])

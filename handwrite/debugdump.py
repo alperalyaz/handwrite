@@ -55,7 +55,8 @@ class DebugDump:
 
     def paper(self, image: np.ndarray, index: int = 0) -> None:
         """Kağıt algılamanın ne kırptığını gösterir."""
-        cropped = detect_paper(image)
+        found = detect_paper(image)
+        cropped = found[0] if found is not None else None
         if cropped is None:
             note = image.copy()
             self._save(f"{index}-2_kagit-BULUNAMADI.png", note)
