@@ -185,9 +185,23 @@ def _cmd_read(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
+    dump = None
+    if args.debug:
+        from .debugdump import DebugDump
+
+        dump = DebugDump.create(args.debug)
+
+    verifier = None
+    if not args.no_verify:
+        from .ai.verify import GeminiVerifier
+
+        verifier = GeminiVerifier(api_key=args.api_key, model=args.model)
+
     images = [(p.name, load_gray(p)) for p in photos]
     try:
-        result = build_from_freeform(images, transcriber, cfg)
+        result = build_from_freeform(
+            images, transcriber, cfg, debug=dump, verifier=verifier
+        )
     except AIError as exc:
         print(f"Okuma başarısız: {exc}", file=sys.stderr)
         return 1
@@ -218,6 +232,9 @@ def _cmd_read(args: argparse.Namespace) -> int:
         target = output.with_suffix(".onizleme.png")
         render_specimen(output, title=cfg.font.family_name).save(target)
         print(f"Önizleme: {target}")
+    if dump is not None:
+        print()
+        print(dump.summary())
     return 0
 
 
@@ -317,6 +334,16 @@ def main(argv: list[str] | None = None) -> int:
         help="eksik karakterleri üretme (font eksik ama tamamen gerçek kalır)",
     )
     read.add_argument("--preview", action="store_true", help="örnek sayfa da üret")
+    read.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="glif denetimini atla (daha hızlı ama yanlış harfler fonta girebilir)",
+    )
+    read.add_argument(
+        "--debug",
+        metavar="KLASOR",
+        help="ara adımları bu klasöre yaz (hangi adımın bozulduğunu görmek için)",
+    )
     read.set_defaults(func=_cmd_read)
 
     preview = sub.add_parser("preview", help="bir fontun örnek sayfasını çiz")

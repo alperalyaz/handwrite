@@ -57,6 +57,8 @@ class Diagnostics:
     dropped_glyphs: int = 0
     #: Sayfada hiç geçmediği için üretilen karakterler.
     synthetic_characters: list[str] = field(default_factory=list)
+    #: Glif denetiminin sonucu (denetim yapıldıysa).
+    verification: object = None
 
     def summary_lines(self) -> list[str]:
         rows = [
@@ -70,6 +72,8 @@ class Diagnostics:
             rows.append(f"elenen satır: {len(self.rejected_lines)}")
         if self.dropped_glyphs:
             rows.append(f"hizalaması şüpheli bulunup atılan glif: {self.dropped_glyphs}")
+        if self.verification is not None:
+            rows.extend(self.verification.summary_lines())
         if self.synthetic_characters:
             rows.append(
                 f"üretilen karakter ({len(self.synthetic_characters)}): "
@@ -178,6 +182,8 @@ def build_from_freeform(
     cfg: Config | None = None,
     min_confidence: float = 0.35,
     progress=None,
+    debug=None,
+    verifier=None,
 ) -> PipelineResult:
     """Herhangi bir el yazısı sayfasından font üretir — şablon gerekmeden.
 
@@ -199,8 +205,15 @@ def build_from_freeform(
 
     for page_index, (name, image) in enumerate(images):
         report(f"Sayfa {page_index + 1}/{len(images)} temizleniyor")
+        if debug is not None:
+            debug.raw(image, page_index)
+            debug.paper(image, page_index)
         page = prepare_page(image, None, cfg.preprocess)
         page_lines = detect_lines(page, cfg.line)
+        if debug is not None:
+            debug.ink(page, page_index)
+            debug.lines(page, page_lines, page_index)
+            debug.strips(page_lines, page_index)
         for line in page_lines:
             index = len(lines)
             origin[index] = (page_index, line.index)
@@ -232,6 +245,8 @@ def build_from_freeform(
         )
     readings = transcriber.transcribe_lines([line.ink for line in lines])
     diagnostics.transcriptions = [(r.index, r.text, r.confidence) for r in readings]
+    if debug is not None:
+        debug.transcription(lines, readings)
 
     usable: list[Line] = []
     for line, reading in zip(lines, readings):
@@ -247,7 +262,7 @@ def build_from_freeform(
     if not usable:
         raise ValueError("Hiçbir satır okunamadı; fotoğrafın okunaklı olduğundan emin olun.")
 
-    return _finish(usable, origin, diagnostics, cfg, report)
+    return _finish(usable, origin, diagnostics, cfg, report, debug, verifier)
 
 
 def build_from_images(
@@ -273,6 +288,8 @@ def _finish(
     diagnostics: Diagnostics,
     cfg: Config,
     progress=None,
+    debug=None,
+    verifier=None,
 ) -> PipelineResult:
     """Satırlardan fonta giden ortak kuyruk.
 
@@ -297,11 +314,29 @@ def _finish(
     # x-yüksekliği, segmentasyondan sonra gerçek gliflerden ölçülür; satırın
     # mürekkep profilinden yapılan ilk tahmin salt büyük harfli satırlarda
     # yanılır ve o satırların glifleri küçük kalırdı.
-    measured, document_xheight = measure_xheights(segmentation.boxes)
-    apply_xheights(segmentation.boxes, measured, document_xheight)
+    if debug is not None:
+        debug.glyphs(segmentation.boxes)
+
+    # Denetim: segmentasyon bir harfin neye benzediğini bilmez, bu yüzden
+    # ürettiği her adayın gerçekten o harf olup olmadığı dışarıdan sorulur.
+    # Geçemeyen fonta girmez; yeterli örneği kalmayan karakter üretilir.
+    boxes = segmentation.boxes
+    if verifier is not None and boxes:
+        from .ai.verify import apply_verification
+
+        report("Glifler denetleniyor")
+        if hasattr(verifier, "on_progress"):
+            verifier.on_progress = lambda done, total: report(
+                f"Glifler denetleniyor — {done}/{total} karakter"
+            )
+        boxes, verification = apply_verification(boxes, verifier)
+        diagnostics.verification = verification
+
+    measured, document_xheight = measure_xheights(boxes)
+    apply_xheights(boxes, measured, document_xheight)
     diagnostics.xheight_px = document_xheight
 
-    glyphs = normalize_all(segmentation.boxes, cfg.font)
+    glyphs = normalize_all(boxes, cfg.font)
     diagnostics.total_samples = len(glyphs)
 
     space = _measure_space(segmentation, measured, document_xheight, cfg)
