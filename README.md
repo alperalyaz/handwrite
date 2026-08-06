@@ -255,11 +255,37 @@ ayar diğer stillerde en kötüsü çıkıyor.
 
 ## Kurulum
 
+**Linux / macOS**
+
 ```bash
-pip install -e .            # çekirdek
-pip install -e '.[web]'     # web arayüzü de
-pytest                      # 49 test, ~3,5 dk
+python3 -m venv .venv
+.venv/bin/pip install -e .          # çekirdek
+.venv/bin/pip install -e '.[web]'   # web arayüzü de
+.venv/bin/pytest                    # 49 test, ~3,5 dk
 ```
+
+**Windows (PowerShell)**
+
+Yol ayıracı ve sanal ortam düzeni farklıdır; `python3` yerine `py` kullanılır:
+
+```powershell
+py -m venv .venv
+.venv\Scripts\pip install -e .
+.venv\Scripts\pip install -e ".[web]"
+.venv\Scripts\pytest
+
+$env:GOOGLE_AI_API_KEY = "..."
+.venv\Scripts\handwrite read yazim.jpg -o Benim.ttf --preview
+```
+
+`py` komutu yoksa Python kurulu değildir: python.org/downloads adresinden
+kurun ve kurulumda **"Add python.exe to PATH"** kutusunu işaretleyin.
+Windows'un "Python bulunamadı, Microsoft Store'dan yükleyin" mesajı, kurulu
+olmayan Python için gösterilen bir yer tutucudur.
+
+Birden çok fotoğraf verirken joker karakter iki platformda da çalışır
+(`foto*.jpg`): PowerShell kalıpları yerleşik olmayan komutlar için
+genişletmediğinden, genişletmeyi araç kendisi yapar.
 
 ## Modüller
 

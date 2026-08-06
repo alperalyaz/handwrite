@@ -18,6 +18,31 @@ from .config import CHARSET, Config
 from .template import DEFAULT_CORPUS, build_sheets, coverage
 
 
+def _resolve_photos(patterns: list[str]) -> tuple[list[Path], list[str]]:
+    """Dosya listesini çözer, gerekirse joker karakterleri kendisi genişletir.
+
+    Unix kabuğu `foto*.jpg` gibi kalıpları komuta ulaşmadan genişletir, ama
+    PowerShell yerleşik olmayan komutlar için bunu yapmaz ve kalıbı olduğu gibi
+    aktarır. Genişletmeyi burada da yapmak, aynı komut satırının iki platformda
+    da çalışmasını sağlar.
+    """
+    resolved: list[Path] = []
+    missing: list[str] = []
+    for pattern in patterns:
+        candidate = Path(pattern)
+        if candidate.exists():
+            resolved.append(candidate)
+            continue
+        if any(ch in pattern for ch in "*?["):
+            base = candidate.parent if candidate.parent != Path("") else Path(".")
+            matches = sorted(base.glob(candidate.name))
+            if matches:
+                resolved.extend(matches)
+                continue
+        missing.append(pattern)
+    return resolved, missing
+
+
 def _cmd_sheets(args: argparse.Namespace) -> int:
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
@@ -61,10 +86,12 @@ def _cmd_build(args: argparse.Namespace) -> int:
     if args.variants:
         cfg.glyph.variants_per_char = args.variants
 
-    photos = [Path(p) for p in args.photos]
-    missing = [p for p in photos if not p.exists()]
+    photos, missing = _resolve_photos(args.photos)
     if missing:
-        print("Bulunamayan dosya: " + ", ".join(str(p) for p in missing), file=sys.stderr)
+        print("Bulunamayan dosya: " + ", ".join(missing), file=sys.stderr)
+        return 2
+    if not photos:
+        print("Hiç fotoğraf verilmedi.", file=sys.stderr)
         return 2
 
     result = build_from_paths(photos, args.sheets, cfg)
@@ -107,10 +134,12 @@ def _cmd_read(args: argparse.Namespace) -> int:
     if args.no_synth:
         cfg.synthesize_missing = False
 
-    photos = [Path(p) for p in args.photos]
-    missing = [p for p in photos if not p.exists()]
+    photos, missing = _resolve_photos(args.photos)
     if missing:
-        print("Bulunamayan dosya: " + ", ".join(str(p) for p in missing), file=sys.stderr)
+        print("Bulunamayan dosya: " + ", ".join(missing), file=sys.stderr)
+        return 2
+    if not photos:
+        print("Hiç fotoğraf verilmedi.", file=sys.stderr)
         return 2
 
     try:
