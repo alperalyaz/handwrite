@@ -88,6 +88,38 @@ DEFAULT_CORPUS: list[str] = [
 ]
 
 
+#: Elinde hazır bir el yazısı olmayanlar için kopyalanacak metin.
+#:
+#: `DEFAULT_CORPUS`tan farkı: bu metin basılı bir şablona değil, kullanıcının
+#: kendi kağıdına serbestçe yazılır. Bu yüzden hem doğal okunması (insan bir
+#: anlam akışını, rastgele kelime listesinden çok daha rahat ve kendi doğal
+#: yazısıyla yazar) hem de tek sayfaya sığması gerekir.
+#:
+#: Karakter kümesinin tamamını kapsar; küçük harfler en az 3 kez geçer.
+#: `tests/test_web.py` bunu doğrular.
+FREEFORM_SAMPLE: list[str] = [
+    "Bugün hava güzeldi, sahilde yürüyüş yaptım.",
+    "Kahve içerken eski bir defteri karıştırdım;",
+    "kenarlarına aldığım notlar hâlâ okunuyordu.",
+    "Şimdi düşününce zaman ne kadar hızlı geçmiş.",
+    "Çocukken yazları köyde geçirirdik. Dedem",
+    "fidanları özenle sular, ağaçların adını",
+    "bana tek tek öğretirdi. Öğleden sonra",
+    "jeoloji kitabı okur, akşam lambanın",
+    "ışığında uzun uzun yazardık o günlerde.",
+    "Vitrindeki pijamalı oyuncak şoför çabucak",
+    "satıldı; fiyatı %20 indirimle düşmüştü.",
+    "quiz, query, wax, extra, taxi, web, oxit",
+    "wolfram, quorum, sandwich, fix, show, qatar",
+    "ABCÇDEFGĞHIİJKLMNOÖPRSŞTUÜVYZ QWX",
+    "ABCÇDEFGĞHIİJKLMNOÖPRSŞTUÜVYZ QWX",
+    "0123456789  3 Haziran, saat 7:30, 6 kişi",
+    "1.450 TL (peşin) ödedim: ucuz muydu?",
+    "Ne güzel! Değil mi? Evet; tam öyle oldu.",
+    "\"Tırnak\" ve 'tek tırnak' ile kısa çizgi-",
+]
+
+
 def coverage(lines: list[str], charset: str) -> dict[str, int]:
     """Verilen satırlarda charset'teki her karakterin kaç kez geçtiğini sayar."""
     counts = dict.fromkeys(charset, 0)

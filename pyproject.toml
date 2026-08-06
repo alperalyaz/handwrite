@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 web = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "python-multipart>=0.0.9"]
+test = ["pytest>=7.4", "httpx2>=0.1"]
 
 [project.scripts]
 handwrite = "handwrite.cli:main"

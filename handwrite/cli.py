@@ -1,11 +1,15 @@
 """Komut satırı arayüzü.
 
-Üç komut, kullanıcının üç adımına karşılık gelir:
+Son kullanıcı için tek komut yeter; gerisi tarayıcıda olur:
 
-    handwrite sheets  -o calisma/      # 1. çalışma sayfalarını üret ve yazdır
-    ...                                # 2. sayfaları elle doldur, fotoğrafla
-    handwrite build   calisma/sheets.json foto*.jpg -o Benim.ttf
-    handwrite preview Benim.ttf        # 3. sonucu gör
+    handwrite serve                    # arayüzü açar
+
+Geri kalan komutlar geliştirme ve toplu iş içindir:
+
+    handwrite read  yazim.jpg -o Benim.ttf      # şablonsuz, model okur
+    handwrite sheets -o calisma/                # basılı çalışma sayfası üret
+    handwrite build  calisma/sheets.json *.jpg  # doldurulmuş sayfalardan üret
+    handwrite preview Benim.ttf                 # örnek sayfa çiz
 """
 
 from __future__ import annotations
@@ -241,11 +245,35 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     except ImportError:
         print(
             "Web arayüzü için ek paketler gerekli:\n"
-            "    pip install 'handwrite[web]'",
+            '    pip install "handwrite[web]"',
             file=sys.stderr,
         )
         return 2
+    from .ai.provider import AIError, load_api_key
     from .web import app
+
+    url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}"
+
+    try:
+        load_api_key()
+        key_note = "API anahtarı bulundu."
+    except AIError:
+        key_note = (
+            "API anahtarı bulunamadı — arayüzde elle girebilirsiniz\n"
+            "   (ya da GOOGLE_AI_API_KEY ortam değişkenini tanımlayın)."
+        )
+
+    print(f"handwrite açık:  {url}")
+    print(f"   {key_note}")
+    print("   Durdurmak için Ctrl+C.")
+
+    if not args.no_open:
+        # Sunucu başlamadan tarayıcı açılırsa boş sayfa gelir; kısa bir gecikme
+        # ile açmak, tek komutla çalışan bir deneyim için yeterli.
+        import threading
+        import webbrowser
+
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
@@ -301,9 +329,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     preview.set_defaults(func=_cmd_preview)
 
-    serve = sub.add_parser("serve", help="web arayüzünü başlat")
+    serve = sub.add_parser("serve", help="web arayüzünü başlat (önerilen kullanım)")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--no-open", action="store_true", help="tarayıcıyı otomatik açma")
     serve.set_defaults(func=_cmd_serve)
 
     args = parser.parse_args(argv)

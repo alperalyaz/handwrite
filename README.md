@@ -4,21 +4,25 @@ El yazısından OpenType font üretir. Form yok, kutu yok, şablon yok:
 **elinizdeki herhangi bir el yazısı sayfasının fotoğrafını verin, yeter.**
 
 ```bash
-export GOOGLE_AI_API_KEY=...
-handwrite read defterim.jpg -o Benim.ttf --preview
+handwrite serve
 ```
 
-Ölçülen: tek bir defter sayfası (14 satır, ~500 karakter) 16 saniyede 87
+Tarayıcı kendiliğinden açılır. Gerisi ekranda: fotoğrafı sürükleyin ya da
+kamerayla çekin, fontu indirin. Elinizde yazılı bir kağıt yoksa arayüz
+kopyalamanız için bütün karakterleri kapsayan bir metin verir.
+
+Ölçülen: tek bir defter sayfası (14 satır, ~500 karakter) ~30 saniyede 87
 karakterlik tam bir fonta dönüşüyor.
 
-Şablonlu bir mod da var — daha yüksek kalite isteyen ve baskı yapabilenler için:
+Komut satırını tercih edenler için aynı işi yapan komutlar:
 
 ```bash
-handwrite sheets -o calisma                    # sayfaları üret, A4'e %100 yazdır
+export GOOGLE_AI_API_KEY=...
+handwrite read defterim.jpg -o Benim.ttf --preview   # şablonsuz, model okur
+
+handwrite sheets -o calisma                          # basılı çalışma sayfası
 handwrite build calisma/sheets.json foto*.jpg -o Benim.ttf
 ```
-
-Web arayüzü için `pip install 'handwrite[web]'` sonrası `handwrite serve`.
 
 ---
 
@@ -261,7 +265,8 @@ ayar diğer stillerde en kötüsü çıkıyor.
 python3 -m venv .venv
 .venv/bin/pip install -e .          # çekirdek
 .venv/bin/pip install -e '.[web]'   # web arayüzü de
-.venv/bin/pytest                    # 49 test, ~3,5 dk
+.venv/bin/pip install -e '.[web,test]'
+.venv/bin/pytest                    # 58 test, ~4 dk
 ```
 
 **Windows (PowerShell)**
@@ -305,4 +310,5 @@ genişletmediğinden, genişletmeyi araç kendisi yapar.
 | `synth.py` | sentetik el yazısı üreteci (test için) |
 | `bench.py` | segmentasyon doğruluğu ölçümü |
 | `specimen.py` | örnek sayfa çizimi |
-| `cli.py` / `web.py` | komut satırı ve web arayüzü |
+| `web.py` | web arayüzü — son kullanıcının gördüğü tek yüz |
+| `cli.py` | komut satırı (geliştirme ve toplu iş) |
