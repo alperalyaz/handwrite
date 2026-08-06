@@ -53,6 +53,10 @@ class Glyph:
     advance_px: float
     line_index: int
     char_index: int
+    #: Bu glif kullanıcının kaleminden mi çıktı, yoksa eksik olduğu için
+    #: üretildi mi? Kullanıcıya üretilmiş bir harfi kendi yazısıymış gibi
+    #: göstermemek için taşınır.
+    synthetic: bool = False
 
     # -- em birimindeki metrikler ------------------------------------------
 
@@ -233,6 +237,8 @@ class CharacterSet:
     #: Varyantların dikey düzenlenmesinde hedef alınır: harflerin taban
     #: çizgisine oturması, en çok göze çarpan tutarlılık ölçütüdür.
     descent: float = 0.0
+    #: Karakterin tamamı üretilmiş mi (kullanıcının sayfasında hiç geçmiyor).
+    synthetic: bool = False
 
     @property
     def kept(self) -> int:

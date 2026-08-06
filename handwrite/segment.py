@@ -79,6 +79,13 @@ class CharBox:
     #: başına). Metin yanlışsa yükselir; hangi gliflerin şüpheli olduğunu
     #: buradan biliriz.
     word_cost: float = 0.0
+    #: Kelimenin ölçeği: kapladığı piksel / beklenen bağıl genişlik toplamı.
+    #: Okunan metinden bir harf düşerse aynı mürekkebe daha az karakter
+    #: sığdırılır ve bu değer belirgin şekilde yükselir. Maliyetten daha
+    #: duyarlı bir sinyaldir, çünkü doğrudan ölçülen bir orandır.
+    word_scale: float = 0.0
+    #: İçinde bulunduğu kelimenin karakter sayısı.
+    word_length: int = 1
 
     @property
     def advance(self) -> int:
@@ -381,6 +388,8 @@ def segment_line(
 
         char_widths = np.array([priors.width(ch) for ch in token], dtype=np.float64)
         bounds, cost = _relaxed_split(start, end, char_widths, cut_cost, cfg)
+        expected = float(char_widths.sum())
+        scale = (end - start) / expected if expected > 0 else 0.0
 
         for k, ch in enumerate(token):
             box = _extract_char(
@@ -388,6 +397,8 @@ def segment_line(
             )
             if box is not None:
                 box.word_cost = cost
+                box.word_scale = scale
+                box.word_length = len(token)
                 boxes.append(box)
         char_offset += len(token)
 
@@ -510,16 +521,40 @@ def drop_misaligned_words(
     Eşik mutlak değil, belgenin kendi maliyet dağılımına göre belirlenir:
     kullanıcının yazısı ne kadar düzgünse taban maliyet o kadar düşüktür.
     """
-    costs = np.array([box.word_cost for box in boxes], dtype=np.float64)
-    finite = costs[np.isfinite(costs)]
-    if finite.size < 10:
+    if len(boxes) < 10:
         return boxes, 0
 
-    median = float(np.median(finite))
-    deviation = float(np.median(np.abs(finite - median))) or 1e-6
-    limit = median + cfg.word_cost_tolerance * deviation
+    costs = np.array([box.word_cost for box in boxes], dtype=np.float64)
+    finite = costs[np.isfinite(costs)]
+    if finite.size:
+        median = float(np.median(finite))
+        deviation = float(np.median(np.abs(finite - median))) or 1e-6
+        cost_limit = median + cfg.word_cost_tolerance * deviation
+    else:
+        cost_limit = INF
 
-    kept = [box for box in boxes if box.word_cost <= limit]
+    # Ölçek sinyali maliyetten daha duyarlıdır. Beş harflik bir kelimeden bir
+    # harf düşerse maliyet ancak biraz artar (genişlik cezası karesel ve küçük
+    # hatalarda cılızdır), ama kelimenin ölçeği doğrudan ~%25 yükselir. Ölçüt
+    # olarak belgenin kendi medyan ölçeği kullanılır.
+    scales = np.array(
+        [box.word_scale for box in boxes if box.word_length >= 3 and box.word_scale > 0],
+        dtype=np.float64,
+    )
+    reference = float(np.median(scales)) if scales.size >= 8 else 0.0
+
+    def suspicious(box: CharBox) -> bool:
+        if box.word_cost > cost_limit:
+            return True
+        if reference <= 0 or box.word_length < 3 or box.word_scale <= 0:
+            return False
+        return abs(box.word_scale / reference - 1.0) > cfg.word_scale_tolerance
+
+    kept = [box for box in boxes if not suspicious(box)]
+    # Her şeyi atmak, hiçbir şey atmamaktan kötüdür: ölçüt yanlış kalibre
+    # olmuşsa fontu tamamen boşaltmak yerine elemeyi iptal ederiz.
+    if len(kept) < len(boxes) * 0.4:
+        return boxes, 0
     return kept, len(boxes) - len(kept)
 
 

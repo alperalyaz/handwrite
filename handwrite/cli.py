@@ -94,6 +94,67 @@ def _cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_read(args: argparse.Namespace) -> int:
+    """Şablonsuz mod: herhangi bir el yazısı sayfasından font üret."""
+    from .ai.gemini import GeminiTranscriber
+    from .ai.provider import AIError
+    from .pipeline import build_from_freeform, write_font
+    from .preprocess import load_gray
+
+    cfg = Config()
+    if args.family:
+        cfg.font.family_name = args.family
+    if args.no_synth:
+        cfg.synthesize_missing = False
+
+    photos = [Path(p) for p in args.photos]
+    missing = [p for p in photos if not p.exists()]
+    if missing:
+        print("Bulunamayan dosya: " + ", ".join(str(p) for p in missing), file=sys.stderr)
+        return 2
+
+    try:
+        transcriber = GeminiTranscriber(api_key=args.api_key, model=args.model)
+    except AIError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    images = [(p.name, load_gray(p)) for p in photos]
+    try:
+        result = build_from_freeform(images, transcriber, cfg)
+    except AIError as exc:
+        print(f"Okuma başarısız: {exc}", file=sys.stderr)
+        return 1
+
+    print("Teşhis:")
+    for line in result.diagnostics.summary_lines():
+        print("  " + line)
+    if args.show_text:
+        print()
+        print("Okunan metin:")
+        for _, text, confidence in result.diagnostics.transcriptions:
+            print(f"  [{confidence:.2f}] {text}")
+    if result.synthesis:
+        print()
+        print("Eksik karakterler:")
+        for line in result.synthesis.summary_lines():
+            print("  " + line)
+
+    output = Path(args.output)
+    write_font(result, output)
+    print()
+    print(f"Font yazıldı: {output}  ({result.build.characters} karakter, "
+          f"{output.stat().st_size / 1024:.0f} KB)")
+
+    if args.preview:
+        from .specimen import render_specimen
+
+        target = output.with_suffix(".onizleme.png")
+        render_specimen(output, title=cfg.font.family_name).save(target)
+        print(f"Önizleme: {target}")
+    return 0
+
+
 def _cmd_preview(args: argparse.Namespace) -> int:
     from .specimen import render_specimen, render_text, render_variant_check
 
@@ -149,6 +210,24 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--variants", type=int, help="karakter başına varyant sayısı")
     build.add_argument("--preview", action="store_true", help="örnek sayfa da üret")
     build.set_defaults(func=_cmd_build)
+
+    read = sub.add_parser(
+        "read",
+        help="şablonsuz: herhangi bir el yazısı sayfasını okuyup font üret",
+    )
+    read.add_argument("photos", nargs="+", help="el yazısı sayfalarının fotoğrafları")
+    read.add_argument("-o", "--output", default="Handwrite-Regular.ttf", help="çıktı .ttf")
+    read.add_argument("--family", help="font ailesi adı")
+    read.add_argument("--model", default="gemini-2.5-flash", help="kullanılacak model")
+    read.add_argument("--api-key", help="API anahtarı (yoksa ortamdan okunur)")
+    read.add_argument("--show-text", action="store_true", help="okunan metni yazdır")
+    read.add_argument(
+        "--no-synth",
+        action="store_true",
+        help="eksik karakterleri üretme (font eksik ama tamamen gerçek kalır)",
+    )
+    read.add_argument("--preview", action="store_true", help="örnek sayfa da üret")
+    read.set_defaults(func=_cmd_read)
 
     preview = sub.add_parser("preview", help="bir fontun örnek sayfasını çiz")
     preview.add_argument("font", help=".ttf dosyası")

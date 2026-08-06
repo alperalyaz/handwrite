@@ -17,7 +17,7 @@ FOREIGN_LOWER = "qwx"
 TURKISH_UPPER = "ABCÇDEFGĞHIİJKLMNOÖPRSŞTUÜVYZ"
 FOREIGN_UPPER = "QWX"
 DIGITS = "0123456789"
-PUNCTUATION = ".,;:!?'\"()-"
+PUNCTUATION = ".,;:!?'\"()-%"
 
 #: Fontta üretilmesi hedeflenen tüm karakterler.
 CHARSET = TURKISH_LOWER + FOREIGN_LOWER + TURKISH_UPPER + FOREIGN_UPPER + DIGITS + PUNCTUATION
@@ -216,6 +216,10 @@ class SegmentConfig:
     #: asıl güvenlik ağı budur: okumadaki tek harflik hata o kelimeyi bozar,
     #: maliyet de bunu ele verir. Düşürmek daha temiz ama daha az glif bırakır.
     word_cost_tolerance: float = 6.0
+    #: Bir kelimenin ölçeği belge medyanından bu oranın ötesinde saparsa
+    #: glifleri atılır. Okunan metinden bir harf düşmesi/eklenmesi bu değeri
+    #: doğrudan yükselttiği için asıl yakalayıcı sinyal budur.
+    word_scale_tolerance: float = 0.20
 
 
 @dataclass
@@ -288,5 +292,11 @@ class Config:
     segment: SegmentConfig = field(default_factory=SegmentConfig)
     glyph: GlyphConfig = field(default_factory=GlyphConfig)
     font: FontConfig = field(default_factory=FontConfig)
+    #: Sayfada hiç geçmeyen karakterleri üret.
+    #:
+    #: Kapatmak fontu eksik ama tamamen gerçek bırakır; açmak kullanılabilir
+    #: bir font verir ama bazı harfler kullanıcının eli değildir. Hangi
+    #: karakterlerin üretildiği teşhiste açıkça bildirilir.
+    synthesize_missing: bool = True
     #: Ara adım görsellerinin yazılacağı klasör (None = üretme).
     debug_dir: str | None = None

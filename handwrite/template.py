@@ -78,7 +78,7 @@ DEFAULT_CORPUS: list[str] = [
     "Xerox Quantum Wolfram Vitrin Ünlem Zarf",
     # -- rakam ve noktalama --------------------------------------------------
     "0123456789 0123456789 0123456789",
-    "1453 1923 2024 3,14 1.000 %50 42 87",
+    "1453 1923 %50 3,14 1.000 %20 42 %75 87",
     "6 7 8 9 tane 5 kilo 3 litre 90 derece",
     "Nokta. Virgül, noktalı; iki nokta:",
     "Liste: bir; iki; üç (dört) beş. Son!",

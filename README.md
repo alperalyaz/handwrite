@@ -1,17 +1,91 @@
 # handwrite
 
-El yazısıyla doldurulmuş sayfaların fotoğrafından tutarlı bir OpenType font üretir.
+El yazısından OpenType font üretir. Form yok, kutu yok, şablon yok:
+**elinizdeki herhangi bir el yazısı sayfasının fotoğrafını verin, yeter.**
 
-Calligraphr'ın kutu doldurtmasına gerek yok: normal bir metin gibi, çizgili
-kağıda doğal şekilde yazarsınız.
-
+```bash
+export GOOGLE_AI_API_KEY=...
+handwrite read defterim.jpg -o Benim.ttf --preview
 ```
-handwrite sheets -o calisma          # 1. sayfaları üret, A4'e %100 ölçekte yazdır
-                                     # 2. örnek metni kendi elinle yaz, fotoğrafla
-handwrite build calisma/sheets.json foto*.jpg -o Benim.ttf --preview
+
+Ölçülen: tek bir defter sayfası (14 satır, ~500 karakter) 16 saniyede 87
+karakterlik tam bir fonta dönüşüyor.
+
+Şablonlu bir mod da var — daha yüksek kalite isteyen ve baskı yapabilenler için:
+
+```bash
+handwrite sheets -o calisma                    # sayfaları üret, A4'e %100 yazdır
+handwrite build calisma/sheets.json foto*.jpg -o Benim.ttf
 ```
 
 Web arayüzü için `pip install 'handwrite[web]'` sonrası `handwrite serve`.
+
+---
+
+## Yapay zekâ tam olarak nerede
+
+İş bölümü bilinçli ve tek cümleyle özetlenebilir:
+
+> **Model *ne* yazdığını söyler, dinamik programlama *nerede* olduğunu bulur.**
+
+| iş | kim yapar | neden |
+|---|---|---|
+| Sayfada ne yazdığını okumak | Gemini | Anlamsal iş; bağlamdan tamamlıyor, Türkçeyi biliyor |
+| Harfin pikselini bulmak | DP | Görsel modellerin sınır kutuları güvenilmez; font em biriminde çalışır ve "yaklaşık" bir kutu glifin ayağını keser |
+| Bozuk glifi ayıklamak | kümeleme | Ölçülebilir ve ucuz |
+| Olmayan harfi üretmek | 3 kademeli sentez | Aşağıda |
+
+Modele piksel koordinatı sordurmak cazip ama yanlış olurdu. Ölçüm: Gemini 2.5
+Flash sentetik Türkçe el yazısını **CER 0,0038** ile okuyor (6 satırın 4'ü
+birebir doğru). Kalan hata tek karakterlik ekleme/düşürme.
+
+### Modelin hatasına dayanıklılık
+
+Okuma mükemmel değil, olması da gerekmiyor. Segmentasyon iki kademeli olduğu
+için — önce kelimeler, sonra kelime içi karakterler — okunan metindeki tek
+harflik bir hata yalnız **kendi kelimesini** etkiler; satırın geri kalanı kendi
+aralıklarına oturmayı sürdürür. Tek kademeli bir hizalamada aynı hata satırdaki
+bütün glifleri kaydırırdı.
+
+Bozulan o birkaç glif de fonta giremez: kendi harflerinin örnek kümesinde aykırı
+kalıp eleme aşamasında düşerler.
+
+## Eksik karakterler: tek sayfa yetmez, biz tamamlarız
+
+Doğal bir metin küçük harfleri bol verir ama düzyazıda "Q" da geçmez, "%" de.
+Ölçtüğümüz gerçek dağılım (500 karakterlik bir sayfa):
+
+| grup | durum |
+|---|---|
+| küçük harfler | bol bol var (`a` ~155, `e` ~115 örnek); tek gerçek eksik `j` |
+| büyük harfler | çoğu yok — düzyazıda sadece cümle başları |
+| rakam, noktalama | metinde geçtiği kadar |
+| `q w x` | yok |
+
+**86 karakterin ~44'ü tek sayfadan çıkmıyor.** Bu boşluk üç kademede, güvenilirlik
+sırasıyla doldurulur:
+
+1. **Bileşim** — eksik karakter kullanıcının *gerçek* kalem izlerinden monte
+   edilir: `Ç` = `C` + `ç`'nin çengeli, `Ğ` = `G` + `ğ`'nin şapkası,
+   `İ` = `I` + `i`'nin noktası. Her parça o elden çıktığı için sonuç kusursuza
+   yakın.
+2. **Büyük/küçük harf aktarımı** — bazı harflerin büyüğü küçüğünün büyütülmüşüdür
+   (`c/C`, `o/O`, `s/S`, `v/V`...). Kullanıcının kendi harfi cap-height'a
+   ölçeklenir, kalem kalınlığı geri çekilir. Biçimi gerçekten değişenler
+   (`a/A`, `e/E`, `g/G`) bu listede yoktur.
+3. **Referans biçim + kullanıcının kalemi** — geri kalan için bir referans yazı
+   tipinin harf biçimi alınır; ölçülen kalem kalınlığı, oranlar, köşe
+   yuvarlaklığı ve el titremesi uygulanır. Genişlikler kullanıcının kendi
+   harfleriyle kalibre edilir (ölçülen düzeltme ~0,89: matbaa harfi el
+   yazısından geniştir).
+
+Üretilen her karakter teşhis ekranında açıkça bildirilir. Kullanıcıya
+üretilmiş bir harfi kendi yazısıymış gibi göstermek doğru olmaz.
+
+Doğrudan görsel üretim (bir resim modeline "bu elle Q çiz" demek) bilerek
+kullanılmadı: bugünkü modeller "el yazısı gibi" şeyler üretiyor ama harfin
+iskeleti yanlış çıkıyor, kalem kalınlığı tutmuyor ve belirli bir eli taklit
+edemiyorlar. Font glifi, resimden çok daha az hata affeder.
 
 ---
 
@@ -160,6 +234,14 @@ ayar diğer stillerde en kötüsü çıkıyor.
 
 ## Bilinen sınırlar
 
+- **Üretilen harfler kullanıcının eli değil.** 3. kademeyle üretilen ~32
+  karakter (çoğu büyük harf, rakam, noktalama) aynı fontun parçası gibi durur
+  ama dikkatli bir göz farkı görür. Kapsamayı tam ve gerçek istiyorsanız
+  şablonlu mod ya da ikinci bir "eksikleri tamamlama" sayfası gerekir.
+- **Okuma hatasının tespiti güvenilir değil.** Hizalama maliyeti şüpheli
+  kelimeleri yakalamak için kullanılıyor ama iki kademeli bölme hatayı kelime
+  sınırını kaydırarak kısmen soğurduğu için maliyet beklendiği kadar
+  yükselmiyor. Asıl koruma, bozuk gliflerin aykırı elemesinde düşmesi.
 - **Tamamen bitişik yazı** (harfler baştan sona bağlı) en zor durum. Çalışıyor
   ama hata oranı ayrık yazıdan yüksek.
 - **Kerning çifti üretilmiyor.** Ölçülen yan boşluklar doğal aralığı büyük
@@ -176,7 +258,7 @@ ayar diğer stillerde en kötüsü çıkıyor.
 ```bash
 pip install -e .            # çekirdek
 pip install -e '.[web]'     # web arayüzü de
-pytest                      # 33 test, ~50 sn
+pytest                      # 49 test, ~3,5 dk
 ```
 
 ## Modüller
@@ -192,6 +274,8 @@ pytest                      # 33 test, ~50 sn
 | `vectorize.py` | bitmap → Bézier kontur |
 | `fontbuild.py` | TTF üretimi, `calt` varyant döngüsü |
 | `pipeline.py` | uçtan uca akış ve teşhis |
+| `ai/gemini.py` | satır satır el yazısı okuma (Gemini) |
+| `synthesize.py` | eksik gliflerin üretilmesi (3 kademe) |
 | `synth.py` | sentetik el yazısı üreteci (test için) |
 | `bench.py` | segmentasyon doğruluğu ölçümü |
 | `specimen.py` | örnek sayfa çizimi |

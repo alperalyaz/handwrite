@@ -20,6 +20,7 @@ from .glyph import GlyphLibrary, apply_xheights, build_library, measure_xheights
 from .lines import Line, deslant_line, detect_lines, lines_from_bands, page_slant
 from .preprocess import RegistrationError, detect_markers, load_gray, prepare_page
 from .segment import DocumentSegmentation, segment_document
+from .synthesize import SynthesisReport, fill_missing
 from .template import SheetSet, SheetSpec
 
 
@@ -54,6 +55,8 @@ class Diagnostics:
     transcriptions: list[tuple[int, str, float]] = field(default_factory=list)
     #: Hizalama maliyeti yüksek olduğu için atılan glif sayısı.
     dropped_glyphs: int = 0
+    #: Sayfada hiç geçmediği için üretilen karakterler.
+    synthetic_characters: list[str] = field(default_factory=list)
 
     def summary_lines(self) -> list[str]:
         rows = [
@@ -67,6 +70,11 @@ class Diagnostics:
             rows.append(f"elenen satır: {len(self.rejected_lines)}")
         if self.dropped_glyphs:
             rows.append(f"hizalaması şüpheli bulunup atılan glif: {self.dropped_glyphs}")
+        if self.synthetic_characters:
+            rows.append(
+                f"üretilen karakter ({len(self.synthetic_characters)}): "
+                + " ".join(self.synthetic_characters)
+            )
         if self.missing_characters:
             rows.append("fontta olmayan karakter: " + " ".join(self.missing_characters))
         if self.weak_characters:
@@ -84,6 +92,7 @@ class PipelineResult:
     build: BuildReport
     diagnostics: Diagnostics
     segmentation: DocumentSegmentation | None = None
+    synthesis: SynthesisReport | None = None
 
 
 def identify_page(gray: np.ndarray, sheets: SheetSet) -> SheetSpec | None:
@@ -287,8 +296,16 @@ def _finish(
 
     from .config import CHARSET
 
+    # Tek bir doğal sayfa küçük harfleri bol verir ama büyük harflerin çoğunu,
+    # rakamları ve noktalamayı vermez. Eksikleri kullanıcıdan ikinci bir sayfa
+    # istemek yerine üretiyoruz.
+    synthesis = fill_missing(library, cfg.font, cfg.glyph) if cfg.synthesize_missing else None
+
     present = set(library.characters)
     diagnostics.missing_characters = [ch for ch in CHARSET if ch not in present]
+    diagnostics.synthetic_characters = sorted(
+        ch for ch, entry in library.characters.items() if entry.synthetic
+    )
     diagnostics.weak_characters = [
         (char, entry.seen, entry.kept)
         for char, entry in sorted(library.characters.items())
@@ -297,6 +314,7 @@ def _finish(
 
     font, build = build_font(library, cfg.font, cfg.glyph)
     return PipelineResult(
+        synthesis=synthesis,
         font=font,
         library=library,
         build=build,
