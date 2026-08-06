@@ -10,6 +10,7 @@ dependencies = [
     "pillow>=10.0",
     "fonttools>=4.40",
     "potracer>=0.0.4",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
