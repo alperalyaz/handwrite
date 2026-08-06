@@ -20,6 +20,7 @@ en iyi saklama biçimidir.
 from __future__ import annotations
 
 import io
+import shutil
 import tempfile
 import threading
 import time
@@ -63,6 +64,10 @@ class Session:
     font_bytes: bytes | None = None
     preview_png: bytes | None = None
     family: str = "Handwrite"
+    #: Ara adım görüntülerinin zip'i. Bir font kötü çıktığında hangi adımın
+    #: bozulduğunu anlamanın tek yolu ara adımlara bakmak; bunu kullanıcıya
+    #: komut satırı ödevi olarak vermek yerine tek tıkla indirilebilir yapıyoruz.
+    debug_zip: bytes | None = None
 
 
 SESSIONS: dict[str, Session] = {}
@@ -91,6 +96,16 @@ class Job:
 
 
 JOBS: dict[str, Job] = {}
+
+
+def _zip_folder(folder: str) -> bytes:
+    """Klasörü belleğe zipler."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(Path(folder).iterdir()):
+            if path.is_file():
+                archive.write(path, path.name)
+    return buffer.getvalue()
 
 
 def _png(image) -> bytes:
@@ -210,9 +225,24 @@ async def read(
     JOBS[job_id] = job
 
     def run() -> None:
+        from .ai.verify import GeminiVerifier
+        from .debugdump import DebugDump
+
+        folder = tempfile.mkdtemp(prefix="handwrite-teshis-")
+        dump = DebugDump.create(folder)
+        try:
+            verifier = GeminiVerifier(api_key=api_key.strip() or None)
+        except AIError:
+            verifier = None
+
         try:
             result = build_from_freeform(
-                images, transcriber, cfg, progress=lambda stage: setattr(job, "stage", stage)
+                images,
+                transcriber,
+                cfg,
+                progress=lambda stage: setattr(job, "stage", stage),
+                debug=dump,
+                verifier=verifier,
             )
         except AIError as exc:
             job.error = f"Okuma başarısız: {exc}"
@@ -228,12 +258,14 @@ async def read(
             entry.font_bytes = buffer.getvalue()
             job.stage = "önizleme çiziliyor"
             _render_preview(entry)
+            entry.debug_zip = _zip_folder(folder)
             SESSIONS[token] = entry
 
             payload = _diagnostics_payload(result)
             payload["session"] = token
             job.payload = payload
         finally:
+            shutil.rmtree(folder, ignore_errors=True)
             job.stage = "bitti"
             job.done = True
 
@@ -338,6 +370,24 @@ def download_font(token: str) -> Response:
         session.font_bytes,
         media_type="font/ttf",
         headers={"Content-Disposition": f'attachment; filename="{name}-Regular.ttf"'},
+    )
+
+
+@app.get("/api/debug/{token}.zip")
+def download_debug(token: str) -> Response:
+    """Ara adım görüntülerini indirir.
+
+    Font beklenenden kötü çıktığında bakılacak yer burası: kağıt algılama,
+    mürekkep maskesi, satır kutuları, modele giden şeritler, okunan metin ve
+    çıkarılan glifler.
+    """
+    session = SESSIONS.get(token)
+    if session is None or session.debug_zip is None:
+        raise HTTPException(404, "teşhis paketi yok")
+    return Response(
+        session.debug_zip,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="handwrite-teshis.zip"'},
     )
 
 
@@ -501,8 +551,12 @@ INDEX_HTML = """
     <h2><span class="n">3</span> Hazır</h2>
     <div class="row">
       <a id="ttf" download><button>.ttf indir</button></a>
-      <span class="muted">İndirip çift tıklayın, sisteme kurulur.</span>
+      <a id="dbg" download><button class="ghost">teşhis paketi indir</button></a>
     </div>
+    <p class="muted" style="margin:10px 0 0">
+      İndirip çift tıklayın, sisteme kurulur. Sonuç beklediğiniz gibi değilse
+      teşhis paketi hangi adımın bozulduğunu gösterir — paylaşırsanız sorun
+      tahminle değil bakılarak bulunur.</p>
     <img class="preview" id="prev" alt="font önizlemesi">
   </div>
 
@@ -675,6 +729,7 @@ $('go').onclick = async () => {
   $('log').textContent = out;
 
   $('ttf').href = '/api/font/' + d.session + '.ttf';
+  $('dbg').href = '/api/debug/' + d.session + '.zip';
   $('prev').src = '/api/preview/' + d.session + '.png?t=' + Date.now();
   $('out').classList.remove('hidden');
   $('out').scrollIntoView({behavior:'smooth', block:'nearest'});
