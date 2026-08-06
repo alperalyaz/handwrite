@@ -405,10 +405,11 @@ def _check_resolution(lines: list[Line], diagnostics: Diagnostics) -> None:
     diagnostics.xheight_px = measured
     if measured < MIN_XHEIGHT_PX:
         diagnostics.warnings.append(
-            f"Yazı fotoğrafta çok küçük görünüyor (x-yüksekliği {measured:.0f} piksel, "
-            f"gereken en az {MIN_XHEIGHT_PX:.0f}). Harfler ayrıştırılamayacak kadar az "
-            "piksele düşüyor. Daha yüksek çözünürlükte çekin ya da sayfaya daha "
-            "yakından, kağıdı kadraja tam sığdıracak şekilde fotoğraflayın."
+            f"Yazı fotoğrafta küçük görünüyor: x-yüksekliği {measured:.0f} piksel, "
+            f"rahat çalışmak için {MIN_XHEIGHT_PX:.0f} gerekiyor. Font yine üretilir "
+            "ama harf sınırları birkaç piksel şaşabilir, o yüzden bazı harflerin "
+            "kenarı eksik ya da fazla çıkar. Daha yüksek çözünürlükte çekmek ya da "
+            "kağıdı kadraja tam sığdırmak gözle görülür fark yaratır."
         )
 
 

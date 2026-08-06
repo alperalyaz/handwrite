@@ -460,3 +460,47 @@ def test_golgede_bolunen_sayfa_ilk_adayla_kirpilmiyor(notebook):
         f"birinci aday mürekkebin {first:.2f}'sini koruyor; gölge sorunu üretmemiş"
     )
     assert second > 0.95, f"ikinci aday da mürekkebi kurtaramıyor ({second:.2f})"
+
+
+def test_kagit_kenari_satir_sanilmiyor(notebook):
+    """Sayfanın üstündeki/altındaki koyu kenar şeridi satır sayılmamalı.
+
+    Kağıt algılama sayfayı dışbükey bir çokgen olarak modeller; gerçek kenar
+    hafif eğik olduğunda arada uca doğru incelen ince bir kama kalıyor. O kama
+    yoğunluk, x-yüksekliği ve sütun doluluğu ölçütlerinin hepsinde gerçek bir
+    satırdan ayırt edilemiyor — ölçüldü, hepsinde gerçek satırların aralığına
+    düşüyor. Ayıran şey yapı: kama tek parça ve satır boyu uzun.
+    """
+    from handwrite.lines import detect_lines
+    from handwrite.preprocess import prepare_page
+
+    cfg = Config()
+    clean = prepare_page(notebook.canonical, None, cfg.preprocess)
+    expected = len(detect_lines(clean, cfg.line))
+    assert expected == len(SAMPLE), "temiz sayfada satır sayısı zaten yanlış"
+
+    # Sayfanın üstüne, gerçek bir kağıt kenarı gibi incelen bir kama çiz.
+    page = notebook.canonical.copy()
+    height, width = page.shape
+    top = int(height * 0.02)
+    for column in range(int(width * 0.15), int(width * 0.85)):
+        thickness = int(round(9 * (1.0 - (column - width * 0.15) / (width * 0.70))))
+        if thickness > 0:
+            page[top : top + thickness, column] = 30
+
+    streaked = prepare_page(page, None, cfg.preprocess)
+    lines = detect_lines(streaked, cfg.line)
+    assert len(lines) == expected, (
+        f"kenar şeridi {len(lines) - expected} fazla satır üretti"
+    )
+
+
+def test_gercek_yazi_satiri_kenar_filtresine_takilmiyor(notebook):
+    """Filtre yalnız şeridi almalı; altı çizili ya da kısa satırları değil."""
+    from handwrite.lines import _drop_edge_streaks, detect_lines
+    from handwrite.preprocess import prepare_page
+
+    cfg = Config()
+    page = prepare_page(notebook.canonical, None, cfg.preprocess)
+    lines = detect_lines(page, cfg.line)
+    assert len(_drop_edge_streaks(lines)) == len(lines)

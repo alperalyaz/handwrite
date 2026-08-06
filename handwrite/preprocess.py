@@ -361,7 +361,7 @@ def _paper_candidates(
     # 9x9 kare çekirdek sayfanın %53'ünü alıyordu, 25'lik elips %97'sini.
     # Geniş bir gölge bandını kapatmaya yetmez — orada ikinci aday devreye girer.
     mask = cv2.morphologyEx(
-        mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+        mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_PAPER_CLOSE,) * 2)
     )
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -394,29 +394,65 @@ def _paper_candidates(
 def _region_from_contour(
     shape: np.ndarray, back: float, height: int, width: int
 ) -> tuple[np.ndarray, np.ndarray | None] | None:
-    """Küçültülmüş görüntüdeki bir konturu tam çözünürlükte bölge maskesine çevirir."""
+    """Küçültülmüş görüntüdeki bir konturu tam çözünürlükte bölge maskesine çevirir.
+
+    Bölge, konturun *dışbükey örtüsüdür*. Bir kağıt yaprağı dışbükeydir;
+    fotoğrafta öyle görünmemesinin sebebi kağıt değil, üstüne düşen gölgedir.
+    İki uç da ölçüldü ve ikisi de kötü:
+
+    - Konturu çevreleyen **dikdörtgen** fazlasını alır. Gerçek bir fotoğrafta
+      kağıdın konturu çevreleyen dikdörtgenin yalnız %74'ünü kaplıyordu; kalan
+      %26 masa ve gölgeydi. O koyu şerit kırpmanın içinde kalınca mürekkep
+      sayılıyor, üstelik sayfanın tamamını saran tek bir bileşen olarak yazı
+      satırlarını birbirine bağlıyordu: mürekkebin %39'u oradan geliyor ve iki
+      satır tek satır sanılıyordu.
+    - **Konturun kendisi** eksiğini alır. Sayfaya vuran gölge, parlak bölgeye
+      kenardan içeri giren bir çentik açıyor; kontur o çentiği sadakatle takip
+      edip sayfanın ortasındaki bir şerit yazıyı dışarıda bırakıyordu —
+      mürekkebin %28'i.
+
+    Dışbükey örtü ikisini de çözer: gölge çentikleri dışbükeyleştirmede
+    kapanır, kağıdın dışındaki koyu şerit örtünün dışında kalır. Ölçüm: yazının
+    %100'ü içeride (kontur ile %72), kırpmanın sol kenarı 96 ton yerine 240 —
+    yani masa değil kağıt.
+    """
     region = np.zeros((height, width), np.uint8)
-    approximation = cv2.approxPolyDP(shape, 0.02 * cv2.arcLength(shape, True), True)
+    hull = cv2.convexHull(shape)
+    scaled = (hull.astype(np.float32) * back).astype(np.int32)
 
-    if len(approximation) == 4:
-        corners = _order_corners(approximation.reshape(4, 2).astype(np.float32) * back)
-        cv2.fillConvexPoly(region, corners.astype(np.int32), 1)
-    else:
-        x, y, w, h = cv2.boundingRect(shape)
-        x, y, w, h = int(x * back), int(y * back), int(w * back), int(h * back)
-        if w < width * 0.2 or h < height * 0.2:
-            return None
-        region[max(0, y) : y + h, max(0, x) : x + w] = 1
-        corners = None
+    x, y, w, h = cv2.boundingRect(scaled)
+    if w < width * 0.2 or h < height * 0.2:
+        return None
 
-    # Kağıdın kenarı fotoğrafta koyu bir şerit olarak görünür (gölge ve kağıdın
-    # kalınlığı). Bölgeyi biraz içeri çekmek o şeridi dışarıda bırakır.
-    inset = max(3, int(min(height, width) * 0.012))
+    cv2.drawContours(region, [scaled], -1, 1, cv2.FILLED)
+
+    # Dört köşe çıkarsa perspektif de düzeltilebilir — telefonla eğik çekilmiş
+    # sayfa düzleşir. Köşeler örtüden okunur; ham kontur gölge çentikleri
+    # yüzünden nadiren dört köşeli görünür.
+    approximation = cv2.approxPolyDP(hull, 0.02 * cv2.arcLength(hull, True), True)
+    corners = (
+        _order_corners(approximation.reshape(4, 2).astype(np.float32) * back)
+        if len(approximation) == 4
+        else None
+    )
+
+    # Bölge içeri çekilir. Çekilecek miktar keyfi değil: yukarıdaki kapama,
+    # gölgenin açtığı çatlakları kapatırken parlak maskeyi kendi yarıçapı kadar
+    # *şişirir* de. O şişme geri alınmazsa kağıdın dışından bir şerit içeride
+    # kalır — ölçüldü, 19 satırlık bir sayfada bu şerit 20. bir "satır" olarak
+    # çıkıyordu. Üstüne kağıdın kendi kenar gölgesi için biraz daha eklenir.
+    inset = max(3, int(_PAPER_CLOSE // 2 * back) + int(min(height, width) * 0.004))
     region = cv2.erode(region, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inset * 2 + 1,) * 2))
     mask = region > 0
     if not mask.any():
         return None
     return mask, corners
+
+
+#: Parlak maskeyi kapatırken kullanılan çekirdek (900 piksellik çalışma
+#: ölçeğinde). Gölgenin açtığı ince çatlakları kapatır; bedeli maskeyi kendi
+#: yarıçapı kadar şişirmesidir, o yüzden bölge sonradan aynı kadar içeri çekilir.
+_PAPER_CLOSE = 25
 
 
 #: Bir pikselin "kalem izi" sayılması için çevresinden kaç ton koyu olması

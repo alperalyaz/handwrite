@@ -242,6 +242,7 @@ def detect_lines(page: Page, cfg: LineConfig, texts: list[str] | None = None) ->
         )
 
     lines = _drop_fragment_lines(lines)
+    lines = _drop_edge_streaks(lines)
     for index, line in enumerate(lines):
         line.index = index
         line.text = texts[index] if texts and index < len(texts) else ""
@@ -262,6 +263,48 @@ def _drop_fragment_lines(lines: list[Line], floor: float = 0.45) -> list[Line]:
     if reference <= 0:
         return lines
     return [line for line in lines if line.xheight >= floor * reference]
+
+
+#: Bir bileşenin "yazı değil, çizgi" sayılması için gereken en/boy oranı ve
+#: satırın en fazla kaç bileşenden oluşabileceği. Ölçüm: kağıt kenarı şeritleri
+#: 15,1 ve 15,2 en/boy ile 4 ve 6 bileşen; gerçek yazı satırlarının hiçbiri
+#: 5,8'i ve hiçbiri 19 bileşenin altını görmüyor. Eşikler aradaki boşluğa
+#: konuyor, iki koşul birden aranıyor ki altı çizili bir kelime tek başına bir
+#: satırı sildirmesin.
+_STREAK_ASPECT = 10.0
+_STREAK_MAX_PARTS = 12
+
+
+def _drop_edge_streaks(lines: list[Line]) -> list[Line]:
+    """Kağıt kenarını satır sanmayı önler.
+
+    Kağıt algılama sayfayı dışbükey bir çokgen olarak modeller; gerçek sayfa
+    kenarı hafifçe eğri ya da eğik olduğunda ikisinin arasında ince, uca doğru
+    incelen bir kama kalır. Bu kama sayfanın en üstünde ya da en altında,
+    genişliği bir yazı satırı kadar olan koyu bir şerit olarak görünür ve
+    yoğunluk, x-yüksekliği, sütun doluluğu gibi ölçütlerin hepsinde gerçek bir
+    satırdan ayırt edilemez — ölçüldü, hepsinde gerçek satırların aralığına
+    düşüyor.
+
+    Ayıran şey *yapı*: bir yazı satırı çok sayıda ayrı parçadan (harfler,
+    kelimeler) oluşur ve hiçbiri kendi boyunun birkaç katından geniş değildir.
+    Kama ise tek parçadır ve satır boyunca uzanır. Hiçbir harf ya da kelime
+    boyunun on katı kadar geniş olmaz.
+    """
+    kept: list[Line] = []
+    for line in lines:
+        mask = line.ink.astype(np.uint8)
+        count, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if count <= 1:
+            continue
+        widths = stats[1:, cv2.CC_STAT_WIDTH]
+        heights = stats[1:, cv2.CC_STAT_HEIGHT]
+        widest = int(np.argmax(widths))
+        aspect = widths[widest] / max(int(heights[widest]), 1)
+        if aspect >= _STREAK_ASPECT and (count - 1) <= _STREAK_MAX_PARTS:
+            continue
+        kept.append(line)
+    return kept
 
 
 # --------------------------------------------------------------------------
