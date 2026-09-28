@@ -1,314 +1,283 @@
 # handwrite
 
-El yazısından OpenType font üretir. Form yok, kutu yok, şablon yok:
-**elinizdeki herhangi bir el yazısı sayfasının fotoğrafını verin, yeter.**
+🇬🇧 English · 🇹🇷 [Türkçe](README.tr.md)
+
+**Turn a photo of your handwriting into a real OpenType font.**
+No boxes, no grid template: write normally on any sheet of paper, take a photo, get a `.ttf`.
 
 ```bash
 handwrite serve
 ```
 
-Tarayıcı kendiliğinden açılır. Gerisi ekranda: fotoğrafı sürükleyin ya da
-kamerayla çekin, fontu indirin. Elinizde yazılı bir kağıt yoksa arayüz
-kopyalamanız için bütün karakterleri kapsayan bir metin verir.
+Your browser opens. Drop in a photo (or use the camera) and download your font.
+If you don't have anything written yet, the UI gives you a short text that covers every character.
 
-Ölçülen: tek bir defter sayfası (14 satır, ~500 karakter) ~30 saniyede 87
-karakterlik tam bir fonta dönüşüyor.
+Measured: a single notebook page (14 lines, ~500 characters) becomes a complete
+87-glyph font in **~30 seconds**.
 
-Komut satırını tercih edenler için aynı işi yapan komutlar:
+> The web UI and the default sample text are currently Turkish. The pipeline itself is
+> language-agnostic for Latin script and covers the full English alphabet.
+
+Prefer the command line?
 
 ```bash
 export GOOGLE_AI_API_KEY=...
-handwrite read defterim.jpg -o Benim.ttf --preview   # şablonsuz, model okur
+handwrite read notebook.jpg -o Mine.ttf --preview      # free-form page, the model reads it
 
-handwrite sheets -o calisma                          # basılı çalışma sayfası
-handwrite build calisma/sheets.json foto*.jpg -o Benim.ttf
+handwrite sheets -o work                               # printable worksheet (no AI needed)
+handwrite build work/sheets.json photo*.jpg -o Mine.ttf
 ```
 
 ---
 
-## Yapay zekâ tam olarak nerede
+## Where exactly the AI is used
 
-İş bölümü bilinçli ve tek cümleyle özetlenebilir:
+The split is deliberate and fits in one sentence:
 
-> **Model *ne* yazdığını söyler, dinamik programlama *nerede* olduğunu bulur.**
+> **The model says *what* is written; dynamic programming finds *where* it is.**
 
-| iş | kim yapar | neden |
+| job | who | why |
 |---|---|---|
-| Sayfada ne yazdığını okumak | Gemini | Anlamsal iş; bağlamdan tamamlıyor, Türkçeyi biliyor |
-| Harfin pikselini bulmak | DP | Görsel modellerin sınır kutuları güvenilmez; font em biriminde çalışır ve "yaklaşık" bir kutu glifin ayağını keser |
-| Bozuk glifi ayıklamak | kümeleme | Ölçülebilir ve ucuz |
-| Olmayan harfi üretmek | 3 kademeli sentez | Aşağıda |
+| Read what the page says | Gemini | A semantic task: context helps, and it knows the language |
+| Find the pixels of each letter | DP | Bounding boxes from vision models are unreliable; fonts work in em units and an "approximate" box cuts off a glyph's foot |
+| Discard broken glyphs | clustering | Measurable and cheap |
+| Create letters that never appeared | 3-tier synthesis | See below |
 
-Modele piksel koordinatı sordurmak cazip ama yanlış olurdu. Ölçüm: Gemini 2.5
-Flash sentetik Türkçe el yazısını **CER 0,0038** ile okuyor (6 satırın 4'ü
-birebir doğru). Kalan hata tek karakterlik ekleme/düşürme.
+Asking the model for pixel coordinates is tempting but wrong. Measured: Gemini 2.5 Flash
+reads synthetic Turkish handwriting at **CER 0.0038** (4 of 6 lines exactly right). The
+remaining errors are single-character insertions or deletions.
 
-### Modelin hatasına dayanıklılık
+### Robust to model mistakes
 
-Okuma mükemmel değil, olması da gerekmiyor. Segmentasyon iki kademeli olduğu
-için — önce kelimeler, sonra kelime içi karakterler — okunan metindeki tek
-harflik bir hata yalnız **kendi kelimesini** etkiler; satırın geri kalanı kendi
-aralıklarına oturmayı sürdürür. Tek kademeli bir hizalamada aynı hata satırdaki
-bütün glifleri kaydırırdı.
+Reading doesn't need to be perfect. Segmentation is two-level (words first, then
+characters inside each word), so a one-letter reading error only affects **its own word**;
+the rest of the line still falls into place. With single-level alignment the same error
+would shift every glyph on the line. The few damaged glyphs never reach the font: they
+are outliers within their own letter's cluster and get filtered out.
 
-Bozulan o birkaç glif de fonta giremez: kendi harflerinin örnek kümesinde aykırı
-kalıp eleme aşamasında düşerler.
+## Missing characters: one page isn't enough, so we fill the gaps
 
-## Eksik karakterler: tek sayfa yetmez, biz tamamlarız
+Natural prose gives you plenty of lowercase letters, but you rarely write "Q" or "%".
+The real distribution on a 500-character page:
 
-Doğal bir metin küçük harfleri bol verir ama düzyazıda "Q" da geçmez, "%" de.
-Ölçtüğümüz gerçek dağılım (500 karakterlik bir sayfa):
-
-| grup | durum |
+| group | status |
 |---|---|
-| küçük harfler | bol bol var (`a` ~155, `e` ~115 örnek); tek gerçek eksik `j` |
-| büyük harfler | çoğu yok — düzyazıda sadece cümle başları |
-| rakam, noktalama | metinde geçtiği kadar |
-| `q w x` | yok |
+| lowercase | plenty (`a` ~155, `e` ~115 samples); the only real gap is `j` |
+| uppercase | mostly missing: only sentence starts |
+| digits, punctuation | only what the text happens to contain |
+| `q w x` | absent |
 
-**86 karakterin ~44'ü tek sayfadan çıkmıyor.** Bu boşluk üç kademede, güvenilirlik
-sırasıyla doldurulur:
+**~44 of 86 characters never appear on a single page.** The gap is filled in three tiers,
+ordered by reliability:
 
-1. **Bileşim** — eksik karakter kullanıcının *gerçek* kalem izlerinden monte
-   edilir: `Ç` = `C` + `ç`'nin çengeli, `Ğ` = `G` + `ğ`'nin şapkası,
-   `İ` = `I` + `i`'nin noktası. Her parça o elden çıktığı için sonuç kusursuza
-   yakın.
-2. **Büyük/küçük harf aktarımı** — bazı harflerin büyüğü küçüğünün büyütülmüşüdür
-   (`c/C`, `o/O`, `s/S`, `v/V`...). Kullanıcının kendi harfi cap-height'a
-   ölçeklenir, kalem kalınlığı geri çekilir. Biçimi gerçekten değişenler
-   (`a/A`, `e/E`, `g/G`) bu listede yoktur.
-3. **Referans biçim + kullanıcının kalemi** — geri kalan için bir referans yazı
-   tipinin harf biçimi alınır; ölçülen kalem kalınlığı, oranlar, köşe
-   yuvarlaklığı ve el titremesi uygulanır. Genişlikler kullanıcının kendi
-   harfleriyle kalibre edilir (ölçülen düzeltme ~0,89: matbaa harfi el
-   yazısından geniştir).
+1. **Composition.** Built from the writer's *real* strokes: `Ç` = `C` + the cedilla of `ç`,
+   `İ` = `I` + the dot of `i`. Every part comes from the same hand, so the result is
+   near-perfect.
+2. **Case transfer.** Some capitals are just scaled lowercase (`c/C`, `o/O`, `s/S`, `v/V`…).
+   The writer's own letter is scaled to cap height and the pen weight is compensated.
+   Letters whose shape truly changes (`a/A`, `e/E`, `g/G`) are excluded.
+3. **Reference shape + your pen.** For the rest, a reference typeface's letter skeleton is
+   used, with your measured stroke weight, proportions, corner roundness and hand jitter
+   applied. Widths are calibrated against your own letters (measured correction ~0.89:
+   printed letters are wider than handwriting).
 
-Üretilen her karakter teşhis ekranında açıkça bildirilir. Kullanıcıya
-üretilmiş bir harfi kendi yazısıymış gibi göstermek doğru olmaz.
+Every generated character is clearly flagged in the diagnostics screen. Presenting a
+synthesized letter as the user's own handwriting would be dishonest.
 
-Doğrudan görsel üretim (bir resim modeline "bu elle Q çiz" demek) bilerek
-kullanılmadı: bugünkü modeller "el yazısı gibi" şeyler üretiyor ama harfin
-iskeleti yanlış çıkıyor, kalem kalınlığı tutmuyor ve belirli bir eli taklit
-edemiyorlar. Font glifi, resimden çok daha az hata affeder.
+Direct image generation ("draw a Q in this hand") was deliberately not used: today's models
+produce things that *look like* handwriting, but the letter skeleton comes out wrong, stroke
+weight drifts, and they can't imitate a specific hand. A font glyph forgives far less than
+a picture.
 
 ---
 
-## Neden kutu yok
+## Why no boxes
 
-Calligraphr'ın kutuları keyfî bir tasarım tercihi değil, gerçek bir problemin
-kaçamağı: **bir karalamanın hangi harf olduğunu bilmek zor.** Kutu, o soruyu
-kullanıcıya yaptırır — kutunun yeri etiketin ta kendisidir.
+The boxes in tools like Calligraphr aren't an arbitrary design choice; they sidestep a real
+problem: **knowing which letter a scribble is, is hard.** The box makes the user answer
+that question. The box's position *is* the label.
 
-handwrite o soruyu hiç sormaz. Kullanıcı, sistemin *önceden bildiği* bir metni
-yazar. Böylece problem "tanıma"dan "hizalama"ya iner:
+handwrite never asks. The user writes a text the system *already knows*, which turns
+"recognition" into "alignment":
 
-> Elimizde N karakterlik bir metin ve o metnin yazılmış hali var. Mürekkebi
-> soldan sağa tam olarak N parçaya nereden bölmeliyiz?
+> Given a text of N characters and a photo of it written out, where should the ink be
+> cut, left to right, into exactly N pieces?
 
-Bu, çözülmüş bir problem türüdür: kısıtlı en iyi bölme. Yapay zekâ modeli,
-eğitim verisi ya da GPU gerekmez — dinamik programlama yeter.
+That's a solved class of problem: constrained optimal segmentation. No trained model,
+no training data, no GPU. Dynamic programming is enough.
 
-## Boru hattı
+## Pipeline
 
 ```
-fotoğraf → sayfa kaydı → mürekkep ayırma → satır → eğim düzeltme
-        → karakter segmentasyonu → glif normalizasyonu → varyant seçimi
-        → vektörleştirme → TTF
+photo → page registration → ink separation → lines → slant correction
+      → character segmentation → glyph normalization → variant selection
+      → vectorization → TTF
 ```
 
-Her adım kendi modülünde ve tek başına test edilebilir.
+Each stage lives in its own module and is testable on its own.
 
-### Sayfa kaydı (`template.py`, `preprocess.py`)
+### Page registration (`template.py`, `preprocess.py`)
 
-Çalışma sayfasının dört köşesinde ArUco işaretleri vardır. Bunlar üç şeyi
-birden çözer:
+In template mode, the worksheet has ArUco markers in its four corners. They solve three
+things at once:
 
-- **Perspektif.** Telefonla eğik çekilmiş fotoğraf, homografi ile kanonik sayfa
-  koordinatlarına oturtulur. Eğiklik tahmin edilmez, çözülür.
-- **Satır–metin eşleşmesi.** Hangi bandın hangi metne karşılık geldiği kesin
-  bilinir; "bu satır hangi cümleydi?" diye tahmin yürütmek gerekmez.
-- **Sayfa kimliği.** Her sayfa farklı işaret kimlikleri taşır, bu yüzden
-  fotoğrafları herhangi bir sırada, adlandırmadan yükleyebilirsiniz.
+- **Perspective.** A skewed phone photo is mapped to canonical page coordinates via
+  homography. The skew is solved, not guessed.
+- **Line-to-text matching.** Which band holds which sentence is known exactly.
+- **Page identity.** Each page carries different marker IDs, so photos can be uploaded
+  in any order, unnamed.
 
-### Mürekkep ayırma
+### Ink separation
 
-Basılı kılavuz çizgilerini ve örnek metni elemek için tek bir kural kullanılır:
+One rule removes the printed guide lines and sample text:
 
-> Bir piksel, şablonun orada olmasını söylediği tondan belirgin şekilde koyuysa
-> el yazısıdır.
+> A pixel is handwriting if it is clearly darker than what the template says should be there.
 
-Şablonu biz ürettiğimiz için her pikselin nominal gri değerini biliriz. Basım ve
-tarama zincirinin bu değerleri nasıl kaydırdığı (`gözlenen ≈ a·nominal + b`)
-sayfanın kendisinden ölçülür — farklı yazıcı, kağıt ve ışıkta kendiliğinden
-kalibre olur.
+Because we generate the template, we know every pixel's nominal gray value. How the
+print-and-scan chain shifts those values (`observed ≈ a·nominal + b`) is measured from the
+page itself, so it self-calibrates across printers, paper and lighting. When a stroke
+crosses the baseline, it's darker than the printed line, so the letter survives. Crude
+rectangle masking can't do that.
 
-Bu kuralın önemi: kullanıcı taban çizgisinin üstünden geçtiğinde kalem izi
-basılı çizgiden koyu olduğu için harf korunur. Kaba dikdörtgen maskeleme bunu
-yapamaz — ya çizgiyi bırakır ya harfi keser.
+### Character segmentation (`segment.py`): the core
 
-### Karakter segmentasyonu (`segment.py`) — çekirdek
+Two costs are balanced:
 
-İki maliyet dengelenir:
+**Cut cost.** A cut isn't a straight vertical line but a *seam* that can drift sideways as
+it goes down. Cutting ink near the baseline is discounted: in joined-up writing that's
+exactly where the connecting stroke is, and where the cut *should* happen.
 
-**Kesim maliyeti.** Kesim düz bir dikey çizgi değil, aşağı doğru yana kayabilen
-bir *dikiş*tir (seam). Taban çizgisi civarındaki mürekkebi kesmek indirimlidir:
-bitişik yazıda harfleri bağlayan çizgi tam oradadır ve kesilmesi *gereken* yer
-orasıdır.
+**Width cost.** "m" is wide, "i" is narrow. Where the ink gives no hint (fully cursive
+writing), this prior puts the cut in the right place. After one pass the priors are
+re-estimated from the writer's *own* hand. Some people write a narrow "m", some a wide "a".
 
-**Genişlik maliyeti.** "m" geniş, "i" dardır. Mürekkebin ipucu vermediği yerde
-(tamamen bitişik yazı) kesimi doğru yere bu önsel oturtur. Önseller bir
-geçişten sonra kullanıcının *kendi* yazısından ölçülüp güncellenir — kimi
-insanın "m"si dar, kiminin "a"sı geniştir.
+Mixed writing goes through the same mechanism: if letters are separate, cut cost is zero
+in the gap and the cut lands there; if they're joined, the width prior picks the cut that
+crosses the least ink.
 
-Karışık yazı bu bileşimden tek mekanizmayla geçer: harfler ayrıksa kesim
-maliyeti boşlukta zaten sıfırdır ve kesim oraya oturur; bitişikse genişlik
-önseli devreye girip en az mürekkep kesen yeri seçer.
+### Consistency (`glyph.py`)
 
-### Tutarlılık (`glyph.py`)
+Put raw crops straight into a font and you get a ransom note. So:
 
-Ham kesitler doğrudan fonta konsa ortaya fidye mektubu çıkar. Yapılanlar:
+- **One slant per page**, measured and removed. Per-line correction creates inconsistency.
+- **Measured x-height**, from the actual x-height letters *after* segmentation. Estimating
+  it from a line's ink profile mistakes cap height for x-height on all-caps lines.
+- **Plausibility filter.** An "a" twice the x-height has stolen a piece of its neighbour.
+  It's dropped before clustering.
+- **Vertical alignment.** On paper, vertical jitter is random and invisible. In a font the
+  same glyph repeats, so jitter becomes *systematic*: an "a" that sat too high sits too high
+  everywhere. Vertical position is therefore mostly normalized.
 
-- **Ortak eğim.** Sayfa başına tek bir eğim ölçülür ve giderilir. Satır başına
-  ayrı düzeltmek tutarsızlık üretirdi.
-- **Ölçülmüş x-yüksekliği.** Segmentasyondan *sonra*, gerçek x-yüksekliği
-  harflerinden ölçülür. Satırın mürekkep profilinden kestirmek, salt büyük
-  harfli satırlarda (alfabe satırı) cap-height'ı x-yüksekliği sanır ve o
-  satırın bütün glifleri küçük çıkar.
-- **Akla yatkınlık filtresi.** x-yüksekliğinde olması gereken bir "a" iki katı
-  boydaysa, kesim komşusundan parça kopartmıştır. Kümelemeye girmeden elenir.
-- **Dikey düzenleme.** Kağıtta dikey titreme her harfte rastgeledir ve gözü
-  rahatsız etmez. Fontta ise aynı glif defalarca kullanılır, yani titreme
-  *sistematik* olur — bir kez yukarıda kalmış "a" metnin her yerinde yukarıda
-  kalır. Bu yüzden dikey konum büyük ölçüde hizalanır.
+### Natural look: variant cycling (`fontbuild.py`)
 
-### Doğal görünüm: varyant döngüsü (`fontbuild.py`)
-
-El yazısı fontlarının sahte görünmesinin bir numaralı sebebi her "a"nın piksel
-piksel aynı olmasıdır. Her karakterin birden çok gerçek örneği fonta konur ve
-OpenType `calt` ile sırayla kullanılır:
+The number one reason handwriting fonts look fake is that every "a" is pixel-identical.
+Several real samples of each character go into the font and are cycled with OpenType `calt`:
 
 ```fea
-sub @BASE @BASE' by @ALT1;    # temel harften sonraki -> 1. varyant
-sub @ALT1 @BASE' by @ALT2;    # 1. varyanttan sonraki -> 2. varyant
+sub @BASE @BASE' by @ALT1;    # after a base letter -> variant 1
+sub @ALT1 @BASE' by @ALT2;    # after variant 1     -> variant 2
 ```
 
-Üçüncü kurala gerek yok: ALT2'den sonraki harf hiçbir kurala uymaz ve temel
-biçimde kalır, döngü kendiliğinden `BASE→ALT1→ALT2→BASE` olur.
+No third rule is needed: after ALT2 nothing matches and the letter stays in its base form,
+so the cycle `BASE→ALT1→ALT2→BASE` falls out naturally.
 
-Varyantlar *çekirdek* havuzdan seçilir. Çeşitliliği doğrudan "merkeze en uzak
-örnek" diye aramak, tam da hasarlı örnekleri seçmek demektir — yanına "r"
-yapışmış bir "o", tanımı gereği en uzaktaki örnektir.
+Variants are picked from the cluster *core*. Searching for diversity as "the sample
+farthest from the center" selects exactly the damaged samples: an "o" with an "r" stuck
+to it is, by definition, the farthest one.
 
-### Ölçülmüş metrikler
+### Measured metrics
 
-İlerleme genişlikleri, yan boşluklar ve boşluk karakterinin genişliği tahmin
-edilmez; kağıt üzerindeki gerçek harf aralıklarından ölçülür. Kişinin yazı
-ritmi fonta böyle geçer.
+Advance widths, side bearings and the width of the space are not guessed; they're measured
+from real letter spacing on the paper. That's how a person's writing rhythm gets into the font.
 
-## Kalite ölçümü
+## Measuring quality
 
-`handwrite.synth` sentetik el yazısı üretirken **her mürekkep pikselinin hangi
-karakter tarafından çizildiğini** kaydeder. Bu sayede segmentasyon göz kararı
-değil piksel sayarak ölçülür (`handwrite.bench`):
+`handwrite.synth` generates synthetic handwriting while recording **which character drew
+every ink pixel**. Segmentation is therefore scored by counting pixels, not by eye
+(`handwrite.bench`):
 
-- **saflık** — bir glife atanan mürekkebin yüzde kaçı gerçekten o harfe ait?
-- **kapsama** — o harfin mürekkebinin yüzde kaçı glife girdi?
+- **purity**: what fraction of the ink assigned to a glyph really belongs to that letter?
+- **coverage**: what fraction of the letter's ink made it into the glyph?
 
-İkisi birden gerekir: yalnız saflığa bakılsa çok dar kesmek, yalnız kapsamaya
-bakılsa çok geniş kesmek "iyi" görünürdü.
+Both are needed: purity alone rewards cutting too narrow, coverage alone rewards cutting too wide.
 
-Mevcut durum — 4 sayfa, 1138 değerlendirilen karakter, 9° eğik ve %45 oranında
-bitişik sentetik yazı, kamera bozulması (perspektif + düzensiz ışık + bulanıklık
-+ gürültü) uygulanmış:
+Current results: 4 pages, 1,138 evaluated characters, synthetic writing slanted 9° and 45%
+joined, with camera degradation applied (perspective, uneven lighting, blur, noise):
 
-| ölçüt | medyan | ortalama |
+| metric | median | mean |
 |---|---|---|
-| saflık | 1.000 | 0.904 |
-| kapsama | 0.985 | 0.895 |
+| purity | 1.000 | 0.904 |
+| coverage | 0.985 | 0.895 |
 
-Karakterlerin %82,3'ü her iki ölçütte de 0.80'in üstünde; %7,3'ü 0.40'ın
-altında.
+82.3% of characters score above 0.80 on both; 7.3% score below 0.40. Outlier rejection
+cleans up that tail, so the glyphs that reach the font are cleaner than the mean suggests.
 
-Kalan hatalı kuyruğu aykırı değer elemesi temizler; fonta giren glifler bu
-yüzden ölçülen ortalamadan daha temizdir.
+Parameters were tuned across different writing styles (slanted cursive / upright print /
+back-slanted), not on a single page. The setting that scores best on one page scores worst
+on the others.
 
-Parametreler tek bir sayfaya göre değil, farklı yazı stillerinde (eğik bitişik /
-dik ayrık / geriye eğik) ölçülerek seçildi — tek sayfada en iyi puanı veren
-ayar diğer stillerde en kötüsü çıkıyor.
+## Known limitations
 
-## Bilinen sınırlar
+- **Synthesized letters aren't your hand.** The ~32 characters from tier 3 (mostly
+  capitals, digits, punctuation) blend in, but a careful eye will notice. For full, real
+  coverage use template mode or a second "fill the gaps" page.
+- **Detecting reading errors is unreliable.** Alignment cost is used to flag suspicious
+  words, but two-level segmentation partly absorbs errors by shifting word boundaries, so
+  the cost doesn't rise as much as expected. The real safeguard is outlier rejection.
+- **Fully cursive writing** is the hardest case. It works, but with a higher error rate.
+- **No kerning pairs.** Measured side bearings give natural spacing, but there aren't
+  enough samples for true pairwise kerning.
+- **No ligatures (`liga`).** Entry and exit strokes of joined writing aren't modeled;
+  letters stand apart.
+- **Character set:** Turkish + English letters, digits and common punctuation (86 chars).
+  Other accented letters (é, ñ, ß…) aren't included yet.
+- Template mode is limited to 12 pages by the ArUco dictionary.
 
-- **Üretilen harfler kullanıcının eli değil.** 3. kademeyle üretilen ~32
-  karakter (çoğu büyük harf, rakam, noktalama) aynı fontun parçası gibi durur
-  ama dikkatli bir göz farkı görür. Kapsamayı tam ve gerçek istiyorsanız
-  şablonlu mod ya da ikinci bir "eksikleri tamamlama" sayfası gerekir.
-- **Okuma hatasının tespiti güvenilir değil.** Hizalama maliyeti şüpheli
-  kelimeleri yakalamak için kullanılıyor ama iki kademeli bölme hatayı kelime
-  sınırını kaydırarak kısmen soğurduğu için maliyet beklendiği kadar
-  yükselmiyor. Asıl koruma, bozuk gliflerin aykırı elemesinde düşmesi.
-- **Tamamen bitişik yazı** (harfler baştan sona bağlı) en zor durum. Çalışıyor
-  ama hata oranı ayrık yazıdan yüksek.
-- **Kerning çifti üretilmiyor.** Ölçülen yan boşluklar doğal aralığı büyük
-  ölçüde veriyor ama gerçek çift bazlı kerning için örnek sayısı yetersiz.
-- **Bağlantı (`liga`) modellenmiyor.** Bitişik yazıda harfleri birleştiren
-  giriş/çıkış çizgileri fontta üretilmiyor; harfler ayrı duruyor.
-- **Eksik karakter sentezi yok.** Metinde geçmeyen bir karakter fonta girmez.
-  Gözlenen gliflerden eksikleri üretmek (few-shot font generation) doğal bir
-  sonraki adım.
-- Sayfa sayısı ArUco sözlüğü nedeniyle 12 ile sınırlı.
-
-## Kurulum
+## Install
 
 **Linux / macOS**
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e .          # çekirdek
-.venv/bin/pip install -e '.[web]'   # web arayüzü de
-.venv/bin/pip install -e '.[web,test]'
-.venv/bin/pytest                    # 58 test, ~4 dk
+.venv/bin/pip install -e '.[web]'
+.venv/bin/handwrite serve
 ```
+
+Run the tests with `.venv/bin/pip install -e '.[web,test]' && .venv/bin/pytest` (58 tests, ~4 min).
 
 **Windows (PowerShell)**
 
-Yol ayıracı ve sanal ortam düzeni farklıdır; `python3` yerine `py` kullanılır:
-
 ```powershell
 py -m venv .venv
-.venv\Scripts\pip install -e .
 .venv\Scripts\pip install -e ".[web]"
-.venv\Scripts\pytest
-
-$env:GOOGLE_AI_API_KEY = "..."
-.venv\Scripts\handwrite read yazim.jpg -o Benim.ttf --preview
+.venv\Scripts\handwrite serve
 ```
 
-`py` komutu yoksa Python kurulu değildir: python.org/downloads adresinden
-kurun ve kurulumda **"Add python.exe to PATH"** kutusunu işaretleyin.
-Windows'un "Python bulunamadı, Microsoft Store'dan yükleyin" mesajı, kurulu
-olmayan Python için gösterilen bir yer tutucudur.
+You need a free [Google AI Studio](https://aistudio.google.com/apikey) API key for free-form
+mode. Set it as `GOOGLE_AI_API_KEY`, or paste it into the web UI (kept in memory only,
+never written to disk). Uploaded photos are processed in memory and not stored.
 
-Birden çok fotoğraf verirken joker karakter iki platformda da çalışır
-(`foto*.jpg`): PowerShell kalıpları yerleşik olmayan komutlar için
-genişletmediğinden, genişletmeyi araç kendisi yapar.
+## Modules
 
-## Modüller
-
-| dosya | iş |
+| file | job |
 |---|---|
-| `config.py` | bütün ayarlanabilir sabitler ve tipografik önseller |
-| `template.py` | çalışma sayfası üretimi, sayfa geometrisi |
-| `preprocess.py` | perspektif düzeltme, aydınlatma, mürekkep ayırma |
-| `lines.py` | satır çıkarma, dikey metrikler, eğim |
-| `segment.py` | kısıtlı karakter segmentasyonu (çekirdek algoritma) |
-| `glyph.py` | normalizasyon, aykırı eleme, varyant seçimi |
-| `vectorize.py` | bitmap → Bézier kontur |
-| `fontbuild.py` | TTF üretimi, `calt` varyant döngüsü |
-| `pipeline.py` | uçtan uca akış ve teşhis |
-| `ai/gemini.py` | satır satır el yazısı okuma (Gemini) |
-| `synthesize.py` | eksik gliflerin üretilmesi (3 kademe) |
-| `synth.py` | sentetik el yazısı üreteci (test için) |
-| `bench.py` | segmentasyon doğruluğu ölçümü |
-| `specimen.py` | örnek sayfa çizimi |
-| `web.py` | web arayüzü — son kullanıcının gördüğü tek yüz |
-| `cli.py` | komut satırı (geliştirme ve toplu iş) |
+| `config.py` | all tunable constants and typographic priors |
+| `template.py` | worksheet generation, page geometry |
+| `preprocess.py` | perspective correction, lighting, ink separation |
+| `lines.py` | line extraction, vertical metrics, slant |
+| `segment.py` | constrained character segmentation (core algorithm) |
+| `glyph.py` | normalization, outlier rejection, variant selection |
+| `vectorize.py` | bitmap → Bézier contours |
+| `fontbuild.py` | TTF output, `calt` variant cycling |
+| `pipeline.py` | end-to-end flow and diagnostics |
+| `ai/gemini.py` | line-by-line handwriting reading (Gemini) |
+| `synthesize.py` | synthesis of missing glyphs (3 tiers) |
+| `synth.py` | synthetic handwriting generator (for tests) |
+| `bench.py` | segmentation accuracy benchmark |
+| `specimen.py` | specimen page rendering |
+| `web.py` | web UI |
+| `cli.py` | command line (development and batch jobs) |
+
+## License
+
+[MIT](LICENSE) © 2026 Alper Alyaz
