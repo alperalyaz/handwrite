@@ -280,4 +280,4 @@ never written to disk). Uploaded photos are processed in memory and not stored.
 
 ## License
 
-[MIT](LICENSE) © 2026 Alper Alyaz
+[MIT](LICENSE) © 2026 [Alper Alyaz](https://alperalyaz.github.io)

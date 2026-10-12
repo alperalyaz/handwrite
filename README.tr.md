@@ -314,4 +314,4 @@ genişletmediğinden, genişletmeyi araç kendisi yapar.
 
 ## Lisans
 
-[MIT](LICENSE) © 2026 Alper Alyaz
+[MIT](LICENSE) © 2026 [Alper Alyaz](https://alperalyaz.github.io)
