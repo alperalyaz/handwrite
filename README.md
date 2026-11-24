@@ -253,6 +253,9 @@ py -m venv .venv
 .venv\Scripts\handwrite serve
 ```
 
+`deploy/huggingface/` holds a Dockerfile and Space card for running the web UI as a
+Hugging Face Space (Docker SDK); visitors paste their own key, the Space holds no secrets.
+
 You need a free [Google AI Studio](https://aistudio.google.com/apikey) API key for free-form
 mode. Set it as `GOOGLE_AI_API_KEY`, or paste it into the web UI (kept in memory only,
 never written to disk). Uploaded photos are processed in memory and not stored.
